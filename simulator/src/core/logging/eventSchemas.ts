@@ -15,6 +15,57 @@ export interface BaseEvent {
 }
 
 // ============================================
+// 공통 타입 정의
+// ============================================
+
+/** 드론 타입 */
+export type DroneType = 
+  | 'RECON_UAV'       // 정찰 드론
+  | 'ATTACK_UAV'      // 공격 드론
+  | 'LOITER_MUNITION' // 배회형 탄약
+  | 'CARGO_UAV'       // 화물 드론
+  | 'CIVILIAN'        // 민간 드론
+  | 'UNKNOWN';        // 미상
+
+/** 드론 크기 분류 */
+export type DroneSize = 'SMALL' | 'MEDIUM' | 'LARGE';
+
+/** 드론 활동 상태 (음향 탐지용) */
+export type DroneActivityState = 
+  | 'IDLE'      // 대기
+  | 'TAKEOFF'   // 이륙
+  | 'APPROACH'  // 접근
+  | 'DEPART'    // 이탈
+  | 'LOITER'    // 배회/선회
+  | 'HOVER';    // 호버링
+
+/** 요격 방식 */
+export type InterceptMethod = 
+  | 'RAM'   // 충돌 요격
+  | 'GUN'   // 사격 요격
+  | 'NET'   // 그물 요격
+  | 'JAM';  // 전자전 재밍
+
+/** 요격 드론 상태 */
+export type InterceptorState = 
+  | 'IDLE'          // 대기
+  | 'SCRAMBLE'      // 출격
+  | 'PURSUING'      // 추격
+  | 'RECON'         // 정찰 모드
+  | 'INTERCEPT_RAM' // 충돌 요격 중
+  | 'INTERCEPT_GUN' // 사격 요격 중
+  | 'INTERCEPT_NET' // 그물 요격 중
+  | 'INTERCEPT_JAM' // 재밍 요격 중
+  | 'RETURNING'     // 귀환 중
+  | 'NEUTRALIZED';  // 무력화
+
+/** 식별 분류 */
+export type Classification = 'HOSTILE' | 'FRIENDLY' | 'NEUTRAL' | 'UNKNOWN';
+
+/** 센서 타입 */
+export type SensorType = 'RADAR' | 'AUDIO' | 'EO';
+
+// ============================================
 // 시나리오 이벤트
 // ============================================
 
@@ -66,6 +117,11 @@ export interface DroneSpawnedEvent extends BaseEvent {
   velocity: { vx: number; vy: number; climbRate: number };
   behavior: string;
   is_hostile: boolean;
+  // 확장 속성
+  drone_type?: DroneType;
+  armed?: boolean;
+  size_class?: DroneSize;
+  recommended_method?: InterceptMethod;  // 권장 요격 방식
 }
 
 export interface TrackUpdateEvent extends BaseEvent {
@@ -84,12 +140,14 @@ export interface TrackUpdateEvent extends BaseEvent {
 
 export interface AudioDetectionEvent extends BaseEvent {
   event: 'audio_detection';
-  drone_id: string;
-  state: string;
-  confidence: number;
+  drone_id: string | null;  // 실제 드론 추정 안 되면 null
+  state: DroneActivityState;
+  confidence: number;       // 0~1
   estimated_distance?: number;
   estimated_bearing?: number;
   is_first_detection: boolean;
+  sensor: 'AUDIO';
+  is_false_alarm?: boolean;
 }
 
 /** 오탐 유형 */
@@ -113,6 +171,32 @@ export interface RadarDetectionEvent extends BaseEvent {
 }
 
 // ============================================
+// EO 정찰 이벤트
+// ============================================
+
+/** EO 카메라 정찰 확인 이벤트 */
+export interface EOConfirmationEvent extends BaseEvent {
+  event: 'eo_confirmation';
+  drone_id: string;
+  interceptor_id: string;
+  classification: Classification;
+  armed: boolean | null;
+  size_class: DroneSize | null;
+  drone_type?: DroneType;
+  confidence: number;      // 0~1
+  sensor: 'EO';
+  recon_duration?: number; // 정찰 소요 시간
+}
+
+/** 정찰 명령 이벤트 */
+export interface ReconCommandEvent extends BaseEvent {
+  event: 'recon_command';
+  target_drone_id: string;
+  interceptor_id: string;
+  issued_by: 'user' | 'auto';
+}
+
+// ============================================
 // 위협 평가 이벤트
 // ============================================
 
@@ -127,8 +211,12 @@ export interface ThreatScoreUpdateEvent extends BaseEvent {
     behavior_score: number;
     payload_score: number;
     size_score: number;
+    audio_detection_score?: number;  // 음향 탐지 가중치
+    eo_confirmed_score?: number;     // EO 확인 가중치
+    armed_score?: number;            // 무장 여부 가중치
   };
   previous_level?: string;
+  eo_confirmed?: boolean;            // EO 정찰 확인 여부
 }
 
 // ============================================
@@ -138,7 +226,7 @@ export interface ThreatScoreUpdateEvent extends BaseEvent {
 export interface EngageCommandEvent extends BaseEvent {
   event: 'engage_command';
   drone_id: string;
-  method: string;
+  method: InterceptMethod;  // 요격 방식
   interceptor_id?: string;
   issued_by: 'user' | 'auto';
 }
@@ -154,6 +242,7 @@ export interface InterceptAttemptEvent extends BaseEvent {
   event: 'intercept_attempt';
   interceptor_id: string;
   target_id: string;
+  method: InterceptMethod;    // 요격 방식
   distance_at_attempt: number;
   relative_speed: number;
   target_evading: boolean;
@@ -168,18 +257,32 @@ export type InterceptFailureReason =
   | 'low_speed'         // 요격기 속도 부족
   | 'sensor_error'      // 센서 오류로 타겟 손실
   | 'fuel_depleted'     // 연료/배터리 소진
-  | 'target_lost';      // 타겟 추적 실패
+  | 'target_lost'       // 타겟 추적 실패
+  | 'jam_failed'        // 재밍 실패
+  | 'gun_missed'        // 사격 빗나감
+  | 'net_missed'        // 그물 빗나감
+  | 'collision_avoided'; // 충돌 회피됨
+
+/** 적 드론 무력화 상태 */
+export type NeutralizationStatus = 
+  | 'DESTROYED'     // 파괴됨
+  | 'CAPTURED'      // 포획됨 (그물)
+  | 'JAMMED'        // 재밍 무력화
+  | 'DISABLED'      // 비활성화
+  | 'ESCAPED';      // 이탈
 
 export interface InterceptResultEvent extends BaseEvent {
   event: 'intercept_result';
   interceptor_id: string;
   target_id: string;
+  method: InterceptMethod;            // 요격 방식
   result: 'success' | 'miss' | 'evaded' | 'aborted';
   reason?: InterceptFailureReason;    // 실패 원인 (실패 시)
   engagement_duration: number;
   final_distance?: number;            // 최종 거리
   target_was_evading?: boolean;       // 타겟 회피 여부
   relative_speed_at_intercept?: number; // 요격 시점 상대속도
+  neutralization_status?: NeutralizationStatus; // 무력화 상태
 }
 
 // ============================================
@@ -246,6 +349,8 @@ export type LogEvent =
   | TrackUpdateEvent
   | AudioDetectionEvent
   | RadarDetectionEvent
+  | EOConfirmationEvent
+  | ReconCommandEvent
   | ThreatScoreUpdateEvent
   | EngageCommandEvent
   | InterceptorSpawnedEvent
@@ -278,6 +383,8 @@ export const EVENT_TYPES = [
   'track_update',
   'audio_detection',
   'radar_detection',
+  'eo_confirmation',
+  'recon_command',
   'threat_score_update',
   'engage_command',
   'interceptor_spawned',
@@ -291,4 +398,41 @@ export const EVENT_TYPES = [
   'clicked_ignore',
   'simulation_control',
 ] as const;
+
+// 요격 방식별 설정
+export const INTERCEPT_METHOD_CONFIG = {
+  RAM: {
+    name: '충돌 요격',
+    min_distance: 0,        // 최소 거리 (m)
+    max_distance: 30,       // 최대 요격 거리 (m)
+    base_success_rate: 0.7, // 기본 성공률
+    speed_factor: 0.3,      // 속도 영향
+    evade_penalty: 0.4,     // 회피 시 성공률 감소
+  },
+  GUN: {
+    name: '사격 요격',
+    min_distance: 100,
+    max_distance: 400,
+    base_success_rate: 0.5,
+    speed_factor: 0.2,
+    evade_penalty: 0.3,
+  },
+  NET: {
+    name: '그물 요격',
+    min_distance: 0,
+    max_distance: 80,
+    base_success_rate: 0.8,
+    speed_factor: 0.4,
+    evade_penalty: 0.5,
+  },
+  JAM: {
+    name: '전자전 재밍',
+    min_distance: 50,
+    max_distance: 300,
+    base_success_rate: 0.6,
+    speed_factor: 0.1,
+    evade_penalty: 0.1,
+    jam_duration_required: 5, // 재밍 필요 시간 (초)
+  },
+} as const;
 

@@ -64,6 +64,10 @@ class InterceptFailureStats:
     low_speed: int = 0
     sensor_error: int = 0
     target_lost: int = 0
+    jam_failed: int = 0
+    gun_missed: int = 0
+    net_missed: int = 0
+    collision_avoided: int = 0
     other: int = 0
     
     @property
@@ -75,6 +79,10 @@ class InterceptFailureStats:
             'low_speed': self.low_speed,
             'sensor_error': self.sensor_error,
             'target_lost': self.target_lost,
+            'jam_failed': self.jam_failed,
+            'gun_missed': self.gun_missed,
+            'net_missed': self.net_missed,
+            'collision_avoided': self.collision_avoided,
             'other': self.other,
         }
     
@@ -83,6 +91,53 @@ class InterceptFailureStats:
         """상위 실패 원인 반환"""
         reasons = [(k, v) for k, v in self.breakdown.items() if v > 0]
         return sorted(reasons, key=lambda x: x[1], reverse=True)
+
+
+@dataclass
+class InterceptMethodStats:
+    """요격 방식별 통계"""
+    method: str
+    attempts: int = 0
+    successes: int = 0
+    failures: int = 0
+    
+    @property
+    def success_rate(self) -> float:
+        total = self.successes + self.failures
+        return self.successes / total * 100 if total > 0 else 0
+
+
+@dataclass
+class InterceptMethodBreakdown:
+    """요격 방식별 상세 분류"""
+    RAM: InterceptMethodStats = field(default_factory=lambda: InterceptMethodStats('RAM'))
+    GUN: InterceptMethodStats = field(default_factory=lambda: InterceptMethodStats('GUN'))
+    NET: InterceptMethodStats = field(default_factory=lambda: InterceptMethodStats('NET'))
+    JAM: InterceptMethodStats = field(default_factory=lambda: InterceptMethodStats('JAM'))
+    UNKNOWN: InterceptMethodStats = field(default_factory=lambda: InterceptMethodStats('UNKNOWN'))
+    
+    def get(self, method: str) -> InterceptMethodStats:
+        return getattr(self, method.upper(), self.UNKNOWN)
+    
+    def add_attempt(self, method: str):
+        stats = self.get(method)
+        stats.attempts += 1
+    
+    def add_success(self, method: str):
+        stats = self.get(method)
+        stats.successes += 1
+    
+    def add_failure(self, method: str):
+        stats = self.get(method)
+        stats.failures += 1
+    
+    def to_dict(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            'RAM': {'attempts': self.RAM.attempts, 'successes': self.RAM.successes, 'failures': self.RAM.failures, 'success_rate': self.RAM.success_rate},
+            'GUN': {'attempts': self.GUN.attempts, 'successes': self.GUN.successes, 'failures': self.GUN.failures, 'success_rate': self.GUN.success_rate},
+            'NET': {'attempts': self.NET.attempts, 'successes': self.NET.successes, 'failures': self.NET.failures, 'success_rate': self.NET.success_rate},
+            'JAM': {'attempts': self.JAM.attempts, 'successes': self.JAM.successes, 'failures': self.JAM.failures, 'success_rate': self.JAM.success_rate},
+        }
 
 
 @dataclass
@@ -149,6 +204,11 @@ class ExperimentMetrics:
     intercept_successes: int = 0
     intercept_failures: int = 0
     intercept_failure_stats: InterceptFailureStats = field(default_factory=InterceptFailureStats)
+    intercept_method_stats: InterceptMethodBreakdown = field(default_factory=InterceptMethodBreakdown)
+    
+    # EO 정찰 통계
+    eo_confirmations: int = 0
+    recon_commands: int = 0
     
     # 위협 평가 통계
     threat_score_updates: int = 0
@@ -273,13 +333,21 @@ def calculate_experiment_metrics(exp: ExperimentData) -> ExperimentMetrics:
                         delay = timestamp - drone.first_radar_detection_time
                         engagement_delay_values.append(delay)
         
+        # 요격 시도
+        elif event_type == 'intercept_attempt':
+            metrics.intercept_attempts += 1
+            method = event.get('method', 'UNKNOWN')
+            metrics.intercept_method_stats.add_attempt(method)
+        
         # 요격 결과
         elif event_type == 'intercept_result':
             result = event.get('result', '').lower()
             reason = event.get('reason', '')
+            method = event.get('method', 'UNKNOWN')
             
             if result == 'success':
                 metrics.intercept_successes += 1
+                metrics.intercept_method_stats.add_success(method)
                 target_id = event.get('target_id', '')
                 if target_id in metrics.drones:
                     metrics.drones[target_id].was_neutralized = True
@@ -287,6 +355,7 @@ def calculate_experiment_metrics(exp: ExperimentData) -> ExperimentMetrics:
             else:
                 metrics.intercept_failures += 1
                 metrics.intercept_failure_stats.total_failures += 1
+                metrics.intercept_method_stats.add_failure(method)
                 
                 # 실패 원인 분류
                 if reason == 'evaded':
@@ -301,8 +370,24 @@ def calculate_experiment_metrics(exp: ExperimentData) -> ExperimentMetrics:
                     metrics.intercept_failure_stats.sensor_error += 1
                 elif reason == 'target_lost':
                     metrics.intercept_failure_stats.target_lost += 1
+                elif reason == 'jam_failed':
+                    metrics.intercept_failure_stats.jam_failed += 1
+                elif reason == 'gun_missed':
+                    metrics.intercept_failure_stats.gun_missed += 1
+                elif reason == 'net_missed':
+                    metrics.intercept_failure_stats.net_missed += 1
+                elif reason == 'collision_avoided':
+                    metrics.intercept_failure_stats.collision_avoided += 1
                 else:
                     metrics.intercept_failure_stats.other += 1
+        
+        # EO 확인
+        elif event_type == 'eo_confirmation':
+            metrics.eo_confirmations += 1
+        
+        # 정찰 명령
+        elif event_type == 'recon_command':
+            metrics.recon_commands += 1
         
         # 위협 평가
         elif event_type == 'threat_score_update':

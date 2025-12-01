@@ -142,6 +142,32 @@ export interface DroneTrack {
   
   /** 추정 탑재체 유형 (옵션) */
   payloadType?: PayloadType;
+  
+  // ===== 확장 속성 (v2) =====
+  
+  /** 드론 타입 */
+  droneType?: DroneType;
+  
+  /** 무장 여부 */
+  armed?: boolean;
+  
+  /** 크기 분류 */
+  sizeClass?: DroneSize;
+  
+  /** 권장 요격 방식 */
+  recommendedMethod?: InterceptMethod;
+  
+  /** EO 정찰 결과 */
+  eoConfirmation?: EOConfirmation;
+  
+  /** 음향 탐지 여부 */
+  audioDetected?: boolean;
+  
+  /** 음향 탐지 상태 */
+  audioState?: DroneActivityState;
+  
+  /** 회피 중 여부 */
+  isEvading?: boolean;
 }
 
 // ============================================
@@ -156,13 +182,19 @@ export interface LogEntry {
   time: number;
   
   /** 로그 유형 */
-  type: "DETECTION" | "THREAT" | "SYSTEM" | "ENGAGEMENT" | "AUDIO";
+  type: "DETECTION" | "THREAT" | "SYSTEM" | "ENGAGEMENT" | "AUDIO" | "RECON" | "INTERCEPT";
   
   /** 로그 메시지 */
   message: string;
   
   /** 관련 드론 ID (있는 경우) */
   droneId?: string;
+  
+  /** 요격 방식 (있는 경우) */
+  method?: InterceptMethod;
+  
+  /** 요격기 ID (있는 경우) */
+  interceptorId?: string;
   
   /** 세부 데이터 */
   data?: Record<string, unknown>;
@@ -254,12 +286,57 @@ export const PAYLOAD_THREAT_SCORES: Record<PayloadType, number> = {
 export type DroneActivityState = 
   | 'NOISE' | 'IDLE' | 'TAKEOFF' | 'HOVER' | 'APPROACH' | 'DEPART';
 
-/** 요격 드론 상태 */
+/** 요격 드론 상태 (확장) */
 export type InterceptorState = 
-  | 'STANDBY' | 'LAUNCHING' | 'PURSUING' | 'ENGAGING' | 'RETURNING' | 'NEUTRALIZED';
+  | 'IDLE' | 'STANDBY' | 'SCRAMBLE' | 'LAUNCHING' | 'PURSUING' 
+  | 'RECON' | 'ENGAGING'
+  | 'INTERCEPT_RAM' | 'INTERCEPT_GUN' | 'INTERCEPT_NET' | 'INTERCEPT_JAM'
+  | 'RETURNING' | 'NEUTRALIZED';
 
 /** 요격 결과 */
 export type InterceptResult = 'SUCCESS' | 'MISS' | 'EVADED' | 'ABORTED';
+
+/** 요격 방식 */
+export type InterceptMethod = 'RAM' | 'GUN' | 'NET' | 'JAM';
+
+/** 요격 방식별 정보 */
+export const INTERCEPT_METHOD_INFO: Record<InterceptMethod, { 
+  name: string; 
+  icon: string; 
+  color: string;
+  description: string;
+}> = {
+  RAM: { name: '충돌', icon: '💥', color: '#ef4444', description: '직접 충돌 요격' },
+  GUN: { name: '사격', icon: '🔫', color: '#f97316', description: '원거리 사격 요격' },
+  NET: { name: '그물', icon: '🕸️', color: '#22c55e', description: '그물 포획 요격' },
+  JAM: { name: '재밍', icon: '📡', color: '#3b82f6', description: '전자전 무력화' },
+};
+
+/** 드론 타입 */
+export type DroneType = 
+  | 'RECON_UAV'       // 정찰 드론
+  | 'ATTACK_UAV'      // 공격 드론
+  | 'LOITER_MUNITION' // 배회형 탄약
+  | 'CARGO_UAV'       // 화물 드론
+  | 'CIVILIAN'        // 민간 드론
+  | 'UNKNOWN';
+
+/** 드론 크기 */
+export type DroneSize = 'SMALL' | 'MEDIUM' | 'LARGE';
+
+/** 식별 분류 */
+export type Classification = 'HOSTILE' | 'FRIENDLY' | 'NEUTRAL' | 'UNKNOWN';
+
+/** EO 정찰 결과 */
+export interface EOConfirmation {
+  confirmed: boolean;
+  classification?: Classification;
+  armed?: boolean;
+  sizeClass?: DroneSize;
+  droneType?: DroneType;
+  confidence?: number;
+  timestamp?: number;
+}
 
 /** 음향 탐지 이벤트 */
 export interface AudioDetectionEvent {
@@ -327,11 +404,47 @@ export type SimulatorEvent =
   | { type: 'simulation_status'; [key: string]: unknown }
   | { type: 'initial_state'; [key: string]: unknown };
 
-/** 요격기 정보 */
+/** 요격기 정보 (확장) */
 export interface Interceptor {
   id: string;
   position: Position;
   state: InterceptorState;
   targetId: string | null;
   distanceToTarget?: number;
+  /** 요격 방식 */
+  method?: InterceptMethod;
+  /** EO 정찰 완료 여부 */
+  eoConfirmed?: boolean;
+  /** 재밍 누적 시간 */
+  jamDuration?: number;
+  /** 사격 시도 횟수 */
+  gunAttempts?: number;
+}
+
+/** EO 확인 이벤트 */
+export interface EOConfirmationEvent {
+  type: 'eo_confirmation';
+  timestamp: number;
+  drone_id: string;
+  interceptor_id: string;
+  classification: Classification;
+  armed: boolean | null;
+  size_class: DroneSize | null;
+  drone_type?: DroneType;
+  confidence: number;
+}
+
+/** 정찰 명령 이벤트 */
+export interface ReconCommandEvent {
+  type: 'recon_command';
+  target_drone_id: string;
+  interceptor_id: string;
+}
+
+/** 교전 명령 이벤트 (확장) */
+export interface EngageCommandEvent {
+  type: 'engage_command';
+  drone_id: string;
+  method: InterceptMethod;
+  interceptor_id?: string;
 }
