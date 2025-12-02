@@ -11,16 +11,19 @@ import {
   InterceptorUpdateEvent,
   InterceptResultEvent,
   SimulationStatusEvent,
+  FusedTrackUpdateEvent,
   DEFAULT_RADAR_CONFIG,
   DEFAULT_INTERCEPTOR_CONFIG,
   DEFAULT_HOSTILE_DRONE_CONFIG,
   HostileDroneBehavior,
   RadarDetectionEvent,
   GuidanceMode,
+  SensorType,
 } from '../../shared/schemas';
 
 import { SimulationWorld, HostileDrone, InterceptorDrone, Position3D } from './types';
 import { RadarSensor } from './sensors/radar';
+import { AcousticSensor } from './sensors/acousticSensor';
 import { createHostileDrone, updateHostileDrone, setDroneBehavior } from './models/hostileDrone';
 import { 
   createInterceptor, 
@@ -34,10 +37,13 @@ import {
 import { getLogger, ExperimentLogger } from './core/logging/logger';
 import { GeneratedScenario, getGenerator } from './core/scenario/generator';
 import * as LogEvents from './core/logging/eventSchemas';
+import { SensorFusion, SensorObservation, FusedTrack } from './core/fusion';
 
 export class SimulationEngine {
   private world: SimulationWorld;
   private radarSensor: RadarSensor;
+  private acousticSensor: AcousticSensor;
+  private sensorFusion: SensorFusion;
   private eventQueue: SimulatorToC2Event[] = [];
   private onEvent: (event: SimulatorToC2Event) => void;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -45,6 +51,7 @@ export class SimulationEngine {
   private currentScenarioId: number | string = 1;
   private evadingDrones: Set<string> = new Set();  // 회피 중인 드론 추적
   private defaultGuidanceMode: GuidanceMode = 'PN';  // 기본 유도 모드
+  private fusionEnabled: boolean = true;  // 센서 융합 활성화 여부
 
   constructor(onEvent: (event: SimulatorToC2Event) => void) {
     this.onEvent = onEvent;
@@ -64,6 +71,8 @@ export class SimulationEngine {
     };
 
     this.radarSensor = new RadarSensor(basePosition, this.world.radarConfig);
+    this.acousticSensor = new AcousticSensor(basePosition);
+    this.sensorFusion = new SensorFusion(basePosition);
   }
 
   /**
@@ -123,6 +132,10 @@ export class SimulationEngine {
     this.world.interceptors.clear();
     this.eventQueue = [];
     this.evadingDrones.clear();
+    
+    // 센서 및 융합 모듈 리셋
+    this.acousticSensor.reset();
+    this.sensorFusion.reset();
     
     this.emitStatusEvent();
   }
@@ -364,7 +377,7 @@ export class SimulationEngine {
       );
       this.world.hostileDrones.set(id, updated);
 
-      // 회피 시작/종료 로깅
+      // 회피 시작/종료 로깅 및 센서 융합 업데이트
       if (!prevEvading && updated.isEvading) {
         this.evadingDrones.add(id);
         this.logger.log({
@@ -373,15 +386,23 @@ export class SimulationEngine {
           drone_id: id,
           trigger: 'interceptor_approach',
         });
+        // 센서 융합에 회피 상태 반영
+        if (this.fusionEnabled) {
+          this.sensorFusion.setTrackEvading(id, true);
+        }
       } else if (prevEvading && !updated.isEvading) {
         this.evadingDrones.delete(id);
         this.logger.log({
           timestamp: this.world.time,
           event: 'evade_end',
           drone_id: id,
-          duration: 0, // 실제로는 추적 필요
+          duration: 0,
           result: 'escaped',
         });
+        // 센서 융합에 회피 종료 반영
+        if (this.fusionEnabled) {
+          this.sensorFusion.setTrackEvading(id, false);
+        }
       }
 
       // 드론 상태 이벤트 발생 (주기적으로)
@@ -413,7 +434,7 @@ export class SimulationEngine {
       this.emitInterceptorEvent(updated);
     });
 
-    // 3. 레이더 스캔
+    // 3. 레이더 스캔 및 센서 융합
     const radarEvents = this.radarSensor.scan(this.world.time, this.world.hostileDrones);
     radarEvents.forEach(event => {
       this.onEvent(event);
@@ -429,13 +450,194 @@ export class SimulationEngine {
         radial_velocity: event.radial_velocity,
         confidence: event.confidence,
         is_false_alarm: event.is_false_alarm || false,
-        is_first_detection: false, // 로거에서 자동 설정
+        is_first_detection: false,
       });
+
+      // 센서 융합: 레이더 → Observation 변환
+      if (this.fusionEnabled) {
+        const observation: SensorObservation = {
+          sensor: 'RADAR',
+          time: this.world.time,
+          droneId: event.is_false_alarm ? null : event.drone_id,
+          bearing: event.bearing,
+          range: event.range,
+          altitude: event.altitude,
+          confidence: event.confidence,
+          metadata: {
+            radialVelocity: event.radial_velocity,
+            isFalseAlarm: event.is_false_alarm,
+          },
+        };
+        this.processObservation(observation);
+      }
     });
 
-    // 4. 주기적 상태 이벤트 (5초마다)
+    // 4. 음향 센서 스캔 및 센서 융합
+    const audioEvents = this.acousticSensor.scan(this.world.time, this.world.hostileDrones);
+    audioEvents.forEach(event => {
+      // 원시 이벤트 전송
+      this.onEvent({
+        type: 'audio_detection',
+        timestamp: event.timestamp,
+        drone_id: event.drone_id || '',
+        state: event.state,
+        confidence: event.confidence,
+        estimated_distance: event.estimated_distance,
+        estimated_bearing: event.estimated_bearing,
+      });
+
+      // 음향 탐지 로깅
+      this.logger.log({
+        timestamp: this.world.time,
+        event: 'audio_detection',
+        drone_id: event.drone_id,
+        state: event.state as LogEvents.DroneActivityState,
+        confidence: event.confidence,
+        estimated_distance: event.estimated_distance,
+        estimated_bearing: event.estimated_bearing,
+        is_first_detection: event.is_first_detection,
+        is_false_alarm: event.is_false_alarm,
+        sensor: 'AUDIO',
+      });
+
+      // 센서 융합: 음향 → Observation 변환
+      if (this.fusionEnabled && !event.is_false_alarm) {
+        const observation: SensorObservation = {
+          sensor: 'AUDIO',
+          time: this.world.time,
+          droneId: event.drone_id || null,
+          bearing: event.estimated_bearing || null,
+          range: event.estimated_distance || null,
+          altitude: null,
+          confidence: event.confidence,
+          metadata: {
+            activityState: event.state,
+            isFirstDetection: event.is_first_detection,
+          },
+        };
+        this.processObservation(observation);
+      }
+    });
+
+    // 5. 센서 융합 트랙 업데이트 (시간 경과에 따른 감쇠)
+    if (this.fusionEnabled) {
+      const { updated, dropped } = this.sensorFusion.updateTracks(this.world.time);
+      
+      // 업데이트된 트랙 이벤트 전송
+      updated.forEach(track => {
+        this.emitFusedTrackEvent(track);
+      });
+
+      // 소멸된 트랙 이벤트 전송
+      dropped.forEach(dropEvent => {
+        this.onEvent({
+          type: 'track_dropped',
+          timestamp: dropEvent.timestamp,
+          track_id: dropEvent.track_id,
+          reason: dropEvent.reason,
+          lifetime: dropEvent.lifetime,
+        });
+        
+        // 로깅 (타입 안전하게)
+        this.logger.log({
+          timestamp: this.world.time,
+          event: 'track_dropped' as const,
+          track_id: dropEvent.track_id,
+          reason: dropEvent.reason,
+          lifetime: dropEvent.lifetime,
+        } as any);
+      });
+    }
+
+    // 6. 주기적 상태 이벤트 (5초마다)
     if (Math.floor(this.world.time) % 5 === 0 && this.world.time % 1 < deltaTime) {
       this.emitStatusEvent();
+    }
+  }
+
+  /**
+   * 센서 관측치 처리 (센서 융합)
+   */
+  private processObservation(observation: SensorObservation): void {
+    const result = this.sensorFusion.processObservation(observation, this.world.time);
+    
+    if (result) {
+      // 트랙 이벤트 전송
+      if (result.event.event === 'track_created') {
+        this.onEvent({
+          type: 'track_created',
+          timestamp: result.event.timestamp,
+          track_id: result.event.track_id,
+          initial_sensor: result.event.initial_sensor,
+          position: result.event.position,
+          confidence: result.event.confidence,
+        });
+        
+        // 로깅 (타입 안전하게)
+        this.logger.log({
+          timestamp: this.world.time,
+          event: 'track_created' as const,
+          track_id: result.event.track_id,
+          initial_sensor: result.event.initial_sensor,
+          position: result.event.position,
+        } as any);
+      } else {
+        this.emitFusedTrackEvent(result.track);
+      }
+    }
+  }
+
+  /**
+   * 융합 트랙 이벤트 전송
+   */
+  private emitFusedTrackEvent(track: FusedTrack): void {
+    const event: FusedTrackUpdateEvent = {
+      type: 'fused_track_update',
+      timestamp: this.world.time,
+      track_id: track.id,
+      drone_id: track.droneId,
+      existence_prob: track.existenceProb,
+      position: track.position,
+      velocity: track.velocity,
+      classification: track.classificationInfo.classification,
+      class_info: {
+        classification: track.classificationInfo.classification,
+        confidence: track.classificationInfo.confidence,
+        armed: track.classificationInfo.armed,
+        sizeClass: track.classificationInfo.sizeClass,
+        droneType: track.classificationInfo.droneType,
+      },
+      threat_score: track.threatScore,
+      threat_level: track.threatLevel,
+      sensors: {
+        radar: track.sensors.radarSeen,
+        audio: track.sensors.audioHeard,
+        eo: track.sensors.eoSeen,
+      },
+      quality: track.quality,
+      is_evading: track.isEvading,
+      is_neutralized: track.isNeutralized,
+    };
+    
+    this.onEvent(event);
+
+    // 주기적 로깅 (매번 로깅하면 너무 많음)
+    if (Math.random() < 0.1) {
+      this.logger.log({
+        timestamp: this.world.time,
+        event: 'fused_track_update' as const,
+        track_id: track.id,
+        drone_id: track.droneId || undefined,
+        existence_prob: track.existenceProb,
+        threat_score: track.threatScore,
+        threat_level: track.threatLevel,
+        sensors: {
+          radar: track.sensors.radarSeen,
+          audio: track.sensors.audioHeard,
+          eo: track.sensors.eoSeen,
+        },
+        quality: track.quality,
+      } as any);
     }
   }
 
@@ -450,6 +652,11 @@ export class SimulationEngine {
     if (result === 'SUCCESS') {
       const updated = { ...target, isNeutralized: true };
       this.world.hostileDrones.set(target.id, updated);
+      
+      // 센서 융합에 무력화 상태 반영
+      if (this.fusionEnabled) {
+        this.sensorFusion.setTrackNeutralized(target.id, true);
+      }
     }
 
     const event: InterceptResultEvent = {
@@ -674,6 +881,8 @@ export class SimulationEngine {
     drones: HostileDrone[];
     interceptors: InterceptorDrone[];
     radarConfig: typeof DEFAULT_RADAR_CONFIG;
+    fusedTracks: FusedTrack[];
+    fusionEnabled: boolean;
   } {
     return {
       time: this.world.time,
@@ -681,7 +890,80 @@ export class SimulationEngine {
       drones: Array.from(this.world.hostileDrones.values()),
       interceptors: Array.from(this.world.interceptors.values()),
       radarConfig: this.world.radarConfig,
+      fusedTracks: this.sensorFusion.getAllTracks(),
+      fusionEnabled: this.fusionEnabled,
     };
+  }
+
+  /**
+   * 센서 융합 활성화/비활성화
+   */
+  setFusionEnabled(enabled: boolean): void {
+    this.fusionEnabled = enabled;
+    console.log(`[SimulationEngine] 센서 융합 ${enabled ? '활성화' : '비활성화'}`);
+  }
+
+  /**
+   * 융합 트랙 반환
+   */
+  getFusedTracks(): FusedTrack[] {
+    return this.sensorFusion.getAllTracks();
+  }
+
+  /**
+   * 특정 드론의 융합 트랙 반환
+   */
+  getFusedTrackByDroneId(droneId: string): FusedTrack | undefined {
+    return this.sensorFusion.getTrackByDroneId(droneId);
+  }
+
+  /**
+   * EO 정찰 결과 처리 (외부에서 호출)
+   */
+  processEOConfirmation(
+    droneId: string,
+    interceptorId: string,
+    classification: 'HOSTILE' | 'FRIENDLY' | 'NEUTRAL' | 'UNKNOWN',
+    armed: boolean | null,
+    sizeClass: 'SMALL' | 'MEDIUM' | 'LARGE' | null,
+    droneType: string | null,
+    confidence: number
+  ): void {
+    if (!this.fusionEnabled) return;
+
+    // null을 undefined로 변환
+    const observation: SensorObservation = {
+      sensor: 'EO',
+      time: this.world.time,
+      droneId,
+      bearing: null,
+      range: null,
+      altitude: null,
+      confidence,
+      classification: classification === 'NEUTRAL' ? 'CIVIL' : classification,
+      classConfidence: confidence,
+      metadata: {
+        armed: armed ?? undefined,
+        sizeClass: sizeClass ?? undefined,
+        droneType: droneType ?? undefined,
+      },
+    };
+
+    this.processObservation(observation);
+
+    // EO 확인 로깅
+    this.logger.log({
+      timestamp: this.world.time,
+      event: 'eo_confirmation',
+      drone_id: droneId,
+      interceptor_id: interceptorId,
+      classification: classification as LogEvents.Classification,
+      armed: armed,
+      size_class: sizeClass as LogEvents.DroneSize | null,
+      drone_type: droneType ? (droneType as LogEvents.DroneType) : undefined,
+      confidence,
+      sensor: 'EO',
+    });
   }
 
   /**

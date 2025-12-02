@@ -144,6 +144,15 @@ function App() {
           setScanRate((event as any).radarConfig.scan_rate || 1);
         }
         break;
+      case 'fused_track_update':
+        handleFusedTrackUpdate(event as any);
+        break;
+      case 'track_created':
+        handleTrackCreated(event as any);
+        break;
+      case 'track_dropped':
+        handleTrackDropped(event as any);
+        break;
       default:
         // scenario_list, scenarios_generated 등 처리
         if ((event as any).type === 'scenario_list' && (event as any).scenarios) {
@@ -151,6 +160,101 @@ function App() {
         }
         break;
     }
+  }
+
+  // 융합 트랙 업데이트 처리
+  function handleFusedTrackUpdate(event: {
+    track_id: string;
+    drone_id: string | null;
+    existence_prob: number;
+    position: { x: number; y: number; altitude: number };
+    velocity: { vx: number; vy: number; climbRate: number };
+    classification: string;
+    class_info: {
+      classification: string;
+      confidence: number;
+      armed: boolean | null;
+      sizeClass: string | null;
+      droneType: string | null;
+    };
+    threat_score: number;
+    threat_level: string;
+    sensors: { radar: boolean; audio: boolean; eo: boolean };
+    quality: number;
+    is_evading: boolean;
+    is_neutralized: boolean;
+  }) {
+    if (!event.drone_id) return;
+
+    setState(prev => {
+      const existingDrone = prev.drones.find(d => d.id === event.drone_id);
+      
+      if (existingDrone) {
+        // 기존 드론 업데이트 (융합 정보 추가)
+        return {
+          ...prev,
+          drones: prev.drones.map(d => 
+            d.id === event.drone_id
+              ? {
+                  ...d,
+                  position: event.position,
+                  velocity: event.velocity,
+                  confidence: event.class_info.confidence,
+                  threat: {
+                    ...d.threat,
+                    totalScore: event.threat_score,
+                    level: event.threat_level as any,
+                  },
+                  lastUpdatedAt: prev.currentTime,
+                  isEvading: event.is_evading,
+                  // 융합 정보
+                  fusedTrackId: event.track_id,
+                  existenceProb: event.existence_prob,
+                  sensorStatus: event.sensors,
+                  trackQuality: event.quality,
+                  fusedClassification: event.classification as any,
+                  // 분류 정보
+                  armed: event.class_info.armed ?? undefined,
+                  sizeClass: (event.class_info.sizeClass as any) ?? undefined,
+                  droneType: (event.class_info.droneType as any) ?? undefined,
+                }
+              : d
+          ),
+        };
+      }
+      
+      return prev;
+    });
+  }
+
+  // 트랙 생성 처리
+  function handleTrackCreated(event: {
+    track_id: string;
+    initial_sensor: string;
+    position: { x: number; y: number; altitude: number };
+    confidence: number;
+  }) {
+    addLog('DETECTION', 
+      `새 트랙 생성: ${event.track_id} (${event.initial_sensor})`,
+      event.track_id
+    );
+  }
+
+  // 트랙 소멸 처리
+  function handleTrackDropped(event: {
+    track_id: string;
+    reason: string;
+    lifetime: number;
+  }) {
+    const reasonLabels: Record<string, string> = {
+      timeout: '시간 초과',
+      neutralized: '무력화',
+      low_existence: '낮은 존재 확률',
+    };
+    addLog('SYSTEM', 
+      `트랙 소멸: ${event.track_id} (${reasonLabels[event.reason] || event.reason}, ${event.lifetime.toFixed(1)}초)`,
+      event.track_id
+    );
   }
 
   // 레이더 탐지 이벤트 처리

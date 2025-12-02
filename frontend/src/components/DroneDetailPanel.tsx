@@ -299,8 +299,10 @@ export default function DroneDetailPanel({
         </div>
 
         {/* 센서 정보 */}
-        <div className="bg-slate-800/50 rounded-lg p-3">
-          <h4 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">센서 정보</h4>
+        <div className="bg-slate-800/50 rounded-lg p-3 space-y-3">
+          <h4 className="text-xs font-medium text-slate-400 uppercase tracking-wider">센서 정보</h4>
+          
+          {/* 기본 센서 소스 */}
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Radio className="w-4 h-4 text-emerald-400" />
@@ -311,8 +313,85 @@ export default function DroneDetailPanel({
               <span className="text-sm text-slate-300">{(drone.confidence * 100).toFixed(0)}%</span>
             </div>
           </div>
+
+          {/* 센서 융합 상태 */}
+          {drone.sensorStatus && (
+            <div className="border-t border-slate-700/50 pt-2">
+              <span className="text-xs text-slate-500 block mb-2">멀티 센서 상태</span>
+              <div className="flex items-center gap-3">
+                <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
+                  drone.sensorStatus.radar 
+                    ? 'bg-emerald-500/20 text-emerald-400' 
+                    : 'bg-slate-700/50 text-slate-500'
+                }`}>
+                  <Radio className="w-3 h-3" />
+                  <span>레이더</span>
+                </div>
+                <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
+                  drone.sensorStatus.audio 
+                    ? 'bg-purple-500/20 text-purple-400' 
+                    : 'bg-slate-700/50 text-slate-500'
+                }`}>
+                  <Volume2 className="w-3 h-3" />
+                  <span>음향</span>
+                </div>
+                <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
+                  drone.sensorStatus.eo 
+                    ? 'bg-blue-500/20 text-blue-400' 
+                    : 'bg-slate-700/50 text-slate-500'
+                }`}>
+                  <Camera className="w-3 h-3" />
+                  <span>EO</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 존재 확률 & 트랙 품질 */}
+          {(drone.existenceProb !== undefined || drone.trackQuality !== undefined) && (
+            <div className="border-t border-slate-700/50 pt-2 grid grid-cols-2 gap-3">
+              {drone.existenceProb !== undefined && (
+                <div>
+                  <span className="text-xs text-slate-500 block mb-1">존재 확률</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full rounded-full ${
+                          drone.existenceProb > 0.7 ? 'bg-emerald-500' :
+                          drone.existenceProb > 0.4 ? 'bg-yellow-500' :
+                          'bg-red-500'
+                        }`}
+                        style={{ width: `${drone.existenceProb * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-slate-300 w-10 text-right">
+                      {(drone.existenceProb * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+              {drone.trackQuality !== undefined && (
+                <div>
+                  <span className="text-xs text-slate-500 block mb-1">트랙 품질</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-cyan-500 rounded-full"
+                        style={{ width: `${drone.trackQuality * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-slate-300 w-10 text-right">
+                      {(drone.trackQuality * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 행동 패턴 */}
           {drone.behaviorPattern && (
-            <div className="mt-2">
+            <div className="border-t border-slate-700/50 pt-2">
               <span className="text-xs text-slate-500">행동 패턴: </span>
               <span className={`text-sm ${
                 drone.behaviorPattern === 'EVADE' ? 'text-amber-400' :
@@ -320,11 +399,14 @@ export default function DroneDetailPanel({
                 'text-slate-300'
               }`}>
                 {drone.behaviorPattern}
+                {drone.isEvading && <span className="ml-2 text-xs text-amber-400">(회피 중)</span>}
               </span>
             </div>
           )}
+
+          {/* 음향 탐지 상태 */}
           {drone.audioDetected && drone.audioState && (
-            <div className="mt-2 flex items-center gap-2">
+            <div className="flex items-center gap-2">
               <Volume2 className="w-4 h-4 text-purple-400" />
               <span className="text-xs text-slate-500">음향 상태: </span>
               <span className={`text-sm ${

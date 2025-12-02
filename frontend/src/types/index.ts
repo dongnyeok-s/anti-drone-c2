@@ -168,6 +168,23 @@ export interface DroneTrack {
   
   /** 회피 중 여부 */
   isEvading?: boolean;
+  
+  // ===== 센서 융합 속성 (v3) =====
+  
+  /** 융합 트랙 ID */
+  fusedTrackId?: string;
+  
+  /** 존재 확률 (0~1) */
+  existenceProb?: number;
+  
+  /** 센서 탐지 상태 */
+  sensorStatus?: TrackSensorStatus;
+  
+  /** 트랙 품질 (0~1) */
+  trackQuality?: number;
+  
+  /** 분류 정보 (융합 결과) */
+  fusedClassification?: FusedClassification;
 }
 
 // ============================================
@@ -422,6 +439,9 @@ export type SimulatorEvent =
   | DroneStateUpdateEvent
   | InterceptorUpdateEvent
   | InterceptResultEvent
+  | FusedTrackUpdateEvent
+  | TrackCreatedEvent
+  | TrackDroppedEvent
   | { type: 'simulation_status'; [key: string]: unknown }
   | { type: 'initial_state'; [key: string]: unknown };
 
@@ -477,4 +497,104 @@ export interface EngageCommandEvent {
   method: InterceptMethod;
   guidance_mode?: GuidanceMode;
   interceptor_id?: string;
+}
+
+// ============================================
+// 센서 융합 관련 타입
+// ============================================
+
+/** 센서 유형 */
+export type SensorType = 'RADAR' | 'AUDIO' | 'EO';
+
+/** 분류 결과 (융합) */
+export type FusedClassification = 'HOSTILE' | 'FRIENDLY' | 'CIVIL' | 'UNKNOWN';
+
+/** 센서 상태 */
+export interface TrackSensorStatus {
+  radar: boolean;
+  audio: boolean;
+  eo: boolean;
+}
+
+/** 분류 정보 */
+export interface TrackClassificationInfo {
+  classification: FusedClassification;
+  confidence: number;
+  armed: boolean | null;
+  sizeClass: DroneSize | null;
+  droneType: string | null;
+}
+
+/** 융합 트랙 */
+export interface FusedTrack {
+  /** 트랙 고유 ID */
+  trackId: string;
+  /** 원본 드론 ID */
+  droneId: string | null;
+  /** 존재 확률 (0~1) */
+  existenceProb: number;
+  /** 위치 */
+  position: Position;
+  /** 속도 */
+  velocity: Velocity;
+  /** 분류 */
+  classification: FusedClassification;
+  /** 상세 분류 정보 */
+  classInfo: TrackClassificationInfo;
+  /** 위협 점수 (0~100) */
+  threatScore: number;
+  /** 위협 레벨 */
+  threatLevel: ThreatLevel;
+  /** 센서 상태 */
+  sensors: TrackSensorStatus;
+  /** 품질 (0~1) */
+  quality: number;
+  /** 회피 중 여부 */
+  isEvading: boolean;
+  /** 무력화 여부 */
+  isNeutralized: boolean;
+}
+
+/** 융합 트랙 업데이트 이벤트 */
+export interface FusedTrackUpdateEvent {
+  type: 'fused_track_update';
+  timestamp: number;
+  track_id: string;
+  drone_id: string | null;
+  existence_prob: number;
+  position: { x: number; y: number; altitude: number };
+  velocity: { vx: number; vy: number; climbRate: number };
+  classification: FusedClassification;
+  class_info: {
+    classification: FusedClassification;
+    confidence: number;
+    armed: boolean | null;
+    sizeClass: DroneSize | null;
+    droneType: string | null;
+  };
+  threat_score: number;
+  threat_level: ThreatLevel;
+  sensors: TrackSensorStatus;
+  quality: number;
+  is_evading: boolean;
+  is_neutralized: boolean;
+}
+
+/** 트랙 생성 이벤트 */
+export interface TrackCreatedEvent {
+  type: 'track_created';
+  timestamp: number;
+  track_id: string;
+  initial_sensor: SensorType;
+  position: { x: number; y: number; altitude: number };
+  confidence: number;
+}
+
+/** 트랙 소멸 이벤트 */
+export interface TrackDroppedEvent {
+  type: 'track_dropped';
+  timestamp: number;
+  track_id: string;
+  reason: 'timeout' | 'neutralized' | 'low_existence';
+  lifetime: number;
 }

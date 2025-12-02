@@ -413,6 +413,10 @@ export const EVENT_TYPES = [
   'clicked_engage',
   'clicked_ignore',
   'simulation_control',
+  // 센서 융합 이벤트
+  'track_created',
+  'fused_track_update',
+  'track_dropped',
 ] as const;
 
 // 요격 방식별 설정
@@ -451,4 +455,40 @@ export const INTERCEPT_METHOD_CONFIG = {
     jam_duration_required: 5, // 재밍 필요 시간 (초)
   },
 } as const;
+
+// ============================================
+// 센서 융합 이벤트
+// ============================================
+
+/** 트랙 생성 이벤트 */
+export interface TrackCreatedLogEvent extends BaseEvent {
+  event: 'track_created';
+  track_id: string;
+  initial_sensor: 'RADAR' | 'AUDIO' | 'EO';
+  position: { x: number; y: number; altitude: number };
+}
+
+/** 트랙 업데이트 이벤트 */
+export interface FusedTrackUpdateLogEvent extends BaseEvent {
+  event: 'fused_track_update';
+  track_id: string;
+  drone_id: string | null;
+  existence_prob: number;
+  threat_score: number;
+  threat_level: string;
+  sensors: {
+    radar: boolean;
+    audio: boolean;
+    eo: boolean;
+  };
+  quality: number;
+}
+
+/** 트랙 소멸 이벤트 */
+export interface TrackDroppedLogEvent extends BaseEvent {
+  event: 'track_dropped';
+  track_id: string;
+  reason: 'timeout' | 'neutralized' | 'low_existence';
+  lifetime: number;
+}
 

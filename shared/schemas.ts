@@ -15,7 +15,8 @@ export type DroneActivityState =
   | 'TAKEOFF'    // 이륙
   | 'HOVER'      // 호버링
   | 'APPROACH'   // 접근
-  | 'DEPART';    // 이탈
+  | 'DEPART'     // 이탈
+  | 'LOITER';    // 배회
 
 /** 적 드론 행동 모드 */
 export type HostileDroneBehavior = 
@@ -51,6 +52,15 @@ export type InterceptMethod =
 export type GuidanceMode = 
   | 'PURE_PURSUIT'  // 기존 직선 추격
   | 'PN';           // Proportional Navigation (비례 항법)
+
+/** 센서 유형 */
+export type SensorType = 'RADAR' | 'AUDIO' | 'EO';
+
+/** 분류 결과 */
+export type Classification = 'HOSTILE' | 'FRIENDLY' | 'CIVIL' | 'UNKNOWN';
+
+/** 위협 레벨 */
+export type ThreatLevel = 'INFO' | 'CAUTION' | 'DANGER' | 'CRITICAL';
 
 /** 교전 방법 (레거시 호환성) */
 export type EngagementMethod = 
@@ -147,6 +157,64 @@ export interface SimulationStatusEvent {
 }
 
 // ============================================
+// 센서 융합 관련 이벤트
+// ============================================
+
+/** 센서 상태 */
+export interface TrackSensorStatus {
+  radar: boolean;
+  audio: boolean;
+  eo: boolean;
+}
+
+/** 분류 정보 */
+export interface TrackClassificationInfo {
+  classification: Classification;
+  confidence: number;
+  armed: boolean | null;
+  sizeClass: 'SMALL' | 'MEDIUM' | 'LARGE' | null;
+  droneType: string | null;
+}
+
+/** 융합 트랙 업데이트 이벤트 */
+export interface FusedTrackUpdateEvent {
+  type: 'fused_track_update';
+  timestamp: number;
+  track_id: string;
+  drone_id: string | null;
+  existence_prob: number;
+  position: { x: number; y: number; altitude: number };
+  velocity: { vx: number; vy: number; climbRate: number };
+  classification: Classification;
+  class_info: TrackClassificationInfo;
+  threat_score: number;
+  threat_level: ThreatLevel;
+  sensors: TrackSensorStatus;
+  quality: number;
+  is_evading: boolean;
+  is_neutralized: boolean;
+}
+
+/** 트랙 생성 이벤트 */
+export interface TrackCreatedEvent {
+  type: 'track_created';
+  timestamp: number;
+  track_id: string;
+  initial_sensor: SensorType;
+  position: { x: number; y: number; altitude: number };
+  confidence: number;
+}
+
+/** 트랙 소멸 이벤트 */
+export interface TrackDroppedEvent {
+  type: 'track_dropped';
+  timestamp: number;
+  track_id: string;
+  reason: 'timeout' | 'neutralized' | 'low_existence';
+  lifetime: number;
+}
+
+// ============================================
 // C2 → 시뮬레이터 명령
 // ============================================
 
@@ -191,7 +259,10 @@ export type SimulatorToC2Event =
   | DroneStateUpdateEvent
   | InterceptorUpdateEvent
   | InterceptResultEvent
-  | SimulationStatusEvent;
+  | SimulationStatusEvent
+  | FusedTrackUpdateEvent
+  | TrackCreatedEvent
+  | TrackDroppedEvent;
 
 /** C2 → 시뮬레이터 모든 명령 */
 export type C2ToSimulatorCommand = 
