@@ -41,3 +41,6 @@ analysis/guidance_comparison.png
 
 # Keep only reports/ directory structure
 !analysis/reports/
+
+# Backend (placeholder for worktree compatibility)
+backend/
