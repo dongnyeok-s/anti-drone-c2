@@ -4,5 +4,6 @@
 
 export * from './types';
 export * from './sensorFusion';
+export * from './threatScore';
 export { default as SensorFusion } from './sensorFusion';
 

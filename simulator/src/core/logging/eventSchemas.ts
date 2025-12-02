@@ -182,18 +182,36 @@ export interface RadarDetectionEvent extends BaseEvent {
 // EO 정찰 이벤트
 // ============================================
 
-/** EO 카메라 정찰 확인 이벤트 */
+/** EO 카메라 탐지 이벤트 (새로운 EO 센서) */
+export interface EODetectionEvent extends BaseEvent {
+  event: 'eo_detection';
+  drone_id: string;
+  bearing: number;              // 방위각 (도)
+  range: number;                // 거리 (m)
+  altitude: number;             // 고도 (m)
+  classification: Classification;
+  class_confidence: number;     // 분류 신뢰도 (0~1)
+  confidence: number;           // 탐지 신뢰도 (0~1)
+  armed: boolean | null;
+  size_class?: DroneSize;
+  drone_type?: DroneType;
+  is_first_detection: boolean;
+  sensor: 'EO';
+}
+
+/** EO 카메라 정찰 확인 이벤트 (기존 호환) */
 export interface EOConfirmationEvent extends BaseEvent {
   event: 'eo_confirmation';
   drone_id: string;
   interceptor_id: string;
   classification: Classification;
+  class_confidence?: number;    // 분류 신뢰도 (추가)
   armed: boolean | null;
   size_class: DroneSize | null;
   drone_type?: DroneType;
-  confidence: number;      // 0~1
+  confidence: number;           // 0~1
   sensor: 'EO';
-  recon_duration?: number; // 정찰 소요 시간
+  recon_duration?: number;      // 정찰 소요 시간
 }
 
 /** 정찰 명령 이벤트 */
@@ -365,6 +383,7 @@ export type LogEvent =
   | TrackUpdateEvent
   | AudioDetectionEvent
   | RadarDetectionEvent
+  | EODetectionEvent       // 새로운 EO 센서 이벤트
   | EOConfirmationEvent
   | ReconCommandEvent
   | ThreatScoreUpdateEvent
@@ -399,6 +418,7 @@ export const EVENT_TYPES = [
   'track_update',
   'audio_detection',
   'radar_detection',
+  'eo_detection',      // 새로운 EO 센서 이벤트
   'eo_confirmation',
   'recon_command',
   'threat_score_update',

@@ -270,7 +270,8 @@ def process_experiment(filepath: str) -> Optional[ExperimentMetrics]:
                 dm = drone_data[drone_id]
                 track_id = event.get('track_id', '')
                 existence_prob = event.get('existence_prob', 0)
-                threat_score = event.get('threat_score', 0)
+                # threat_score 또는 fused_threat_score 필드 확인
+                threat_score = event.get('threat_score', event.get('fused_threat_score', 0))
                 
                 if track_id and track_id not in dm.track_ids:
                     dm.track_ids.append(track_id)

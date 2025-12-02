@@ -25,6 +25,13 @@ import {
   TrackDroppedEvent,
 } from './types';
 
+import {
+  computeThreatScore as computeThreat,
+  getThreatLevel,
+  ThreatScoreConfig,
+  DEFAULT_THREAT_SCORE_CONFIG,
+} from './threatScore';
+
 // ============================================
 // 유틸리티 함수
 // ============================================
@@ -220,7 +227,7 @@ export class SensorFusion {
       } else {
         // 위협 점수 재계산
         track.threatScore = this.computeThreatScore(track);
-        track.threatLevel = this.getThreatLevel(track.threatScore);
+        track.threatLevel = getThreatLevel(track.threatScore);
         track.lastUpdateTime = currentTime;
         updated.push(track);
       }
@@ -346,8 +353,17 @@ export class SensorFusion {
       droneType: obs.metadata?.droneType ?? null,
     };
 
-    // 초기 존재 확률 (센서별 가중치 적용)
-    const initialExistence = this.getSensorExistenceWeight(obs.sensor) * obs.confidence;
+    // 초기 존재 확률 (센서별 가중치 적용) - 더 높은 초기값
+    let initialExistence = this.getSensorExistenceWeight(obs.sensor) * obs.confidence;
+    
+    // EO는 더 높은 초기 확률
+    if (obs.sensor === 'EO') {
+      initialExistence = Math.max(initialExistence, 0.65);
+    }
+    // RADAR도 높은 확률
+    if (obs.sensor === 'RADAR' && obs.confidence > 0.7) {
+      initialExistence = Math.max(initialExistence, 0.55);
+    }
 
     const track: FusedTrack = {
       id,
@@ -355,7 +371,7 @@ export class SensorFusion {
       position,
       previousPosition: null,
       velocity: { vx: 0, vy: 0, climbRate: 0 },
-      existenceProb: clamp(initialExistence, 0.3, 0.9),
+      existenceProb: clamp(initialExistence, 0.35, 0.95),
       lastUpdateTime: currentTime,
       createdTime: currentTime,
       sensors,
@@ -371,7 +387,7 @@ export class SensorFusion {
 
     // 위협 점수 계산
     track.threatScore = this.computeThreatScore(track);
-    track.threatLevel = this.getThreatLevel(track.threatScore);
+    track.threatLevel = getThreatLevel(track.threatScore);
 
     return track;
   }
@@ -403,7 +419,7 @@ export class SensorFusion {
 
     // (E) 위협 점수 재계산
     track.threatScore = this.computeThreatScore(track);
-    track.threatLevel = this.getThreatLevel(track.threatScore);
+    track.threatLevel = getThreatLevel(track.threatScore);
 
     // 품질 업데이트
     track.quality = this.calculateTrackQuality(track);
@@ -416,16 +432,54 @@ export class SensorFusion {
   /**
    * (A) 존재 확률 업데이트 (베이즈 기반)
    * 
-   * p' = clamp(p + w_sensor * (2*conf - 1), 0, 1)
+   * 공식: p' = clamp(p + w_sensor * (2*conf - 1), 0, 1)
+   * 
+   * - 탐지 신뢰도 > 0.5: 존재 확률 증가
+   * - 탐지 신뢰도 < 0.5: 존재 확률 감소
+   * - EO 센서: 가장 큰 영향력 (분류 포함)
+   * - AUDIO 센서: 보조적 역할
+   * - 다중 센서 확인 시 시너지 효과
    */
   private updateExistenceProb(track: FusedTrack, obs: SensorObservation): FusedTrack {
     const weight = this.getSensorExistenceWeight(obs.sensor);
     const conf = obs.confidence;
     const p = track.existenceProb;
 
-    // 탐지되면 확률 증가, 신뢰도 낮으면 약간만 증가
-    const delta = weight * (2 * conf - 1);
-    const newProb = clamp(p + delta * 0.3, 0, 1);
+    // 탐지되면 확률 증가 (공식 그대로 적용)
+    // delta = w * (2*conf - 1)
+    // conf = 1.0 -> delta = +w
+    // conf = 0.5 -> delta = 0
+    // conf = 0.0 -> delta = -w
+    let delta = weight * (2 * conf - 1);
+    
+    // 업데이트 강도 (센서별 차등 적용) - 향상됨
+    let updateRate = 0.5;  // 기본 업데이트 강도 (증가)
+    if (obs.sensor === 'EO') {
+      updateRate = 0.7;  // EO는 더 강한 영향력
+      // EO가 HOSTILE로 분류하면 추가 부스트
+      if (obs.classification === 'HOSTILE' && obs.classConfidence && obs.classConfidence > 0.7) {
+        delta += 0.2;  // 추가 존재 확률 증가
+      }
+    } else if (obs.sensor === 'AUDIO') {
+      updateRate = 0.4;  // AUDIO도 영향력 증가
+    } else if (obs.sensor === 'RADAR') {
+      updateRate = 0.55;  // RADAR도 약간 증가
+    }
+    
+    // 다중 센서 시너지 (이미 다른 센서로 탐지된 경우 수렴 가속)
+    let sensorCount = 0;
+    if (track.sensors.radarSeen) sensorCount++;
+    if (track.sensors.audioHeard) sensorCount++;
+    if (track.sensors.eoSeen) sensorCount++;
+    
+    if (sensorCount >= 2) {
+      updateRate *= 1.2;  // 20% 추가 가속
+    }
+    if (sensorCount >= 3) {
+      updateRate *= 1.3;  // 총 30% 추가 가속 (3개 모두 탐지)
+    }
+    
+    const newProb = clamp(p + delta * updateRate, 0.05, 0.99);
 
     return { ...track, existenceProb: newProb };
   }
@@ -582,110 +636,26 @@ export class SensorFusion {
   }
 
   // ============================================
-  // 위협 평가
+  // 위협 평가 (새로운 threatScore 모듈 사용)
   // ============================================
 
   /**
    * 위협 점수 계산
+   * threatScore.ts 모듈을 사용하여 계산
    */
   computeThreatScore(track: FusedTrack): number {
-    const config = this.config.threatAssessment;
-    const weights = config.weights;
-    let score = 0;
-
-    // 1. 존재 확률 점수
-    if (track.existenceProb > 0.7) {
-      score += 30 * weights.existence / 0.2;
-    } else if (track.existenceProb > 0.5) {
-      score += 15 * weights.existence / 0.2;
-    }
-
-    // 2. 분류 점수
-    const classScore = this.getClassificationThreatScore(track.classificationInfo);
-    score += classScore * (weights.classification / 0.3) * 40;
-
-    // 3. 거리 점수 (가까울수록 높음)
-    const distance = calculateDistance(config.basePosition, track.position);
-    const distanceScore = 1 - clamp(distance / config.safeDistance, 0, 1);
-    score += distanceScore * (weights.distance / 0.25) * 25;
-
-    // 4. 속도/접근 점수
-    const speed = Math.sqrt(track.velocity.vx ** 2 + track.velocity.vy ** 2);
-    const approachAngle = this.calculateApproachAngle(track);
-    const velocityScore = clamp(speed / 30, 0, 1) * approachAngle;
-    score += velocityScore * (weights.velocity / 0.15) * 15;
-
-    // 5. 행동 점수 (회피 중이면 위협적)
-    if (track.isEvading) {
-      score += 10 * weights.behavior / 0.1;
-    }
-
-    return clamp(Math.round(score), 0, 100);
+    const threatConfig: ThreatScoreConfig = {
+      basePosition: this.basePosition,
+      safeDistance: this.config.threatAssessment.safeDistance,
+      dangerDistance: this.config.threatAssessment.dangerDistance,
+      criticalDistance: 80,
+      threatSpeedThreshold: 10,
+      highSpeedThreshold: 25,
+    };
+    
+    return computeThreat(track, threatConfig);
   }
 
-  /**
-   * 분류에 따른 위협 점수
-   */
-  private getClassificationThreatScore(info: ClassificationInfo): number {
-    let score = 0;
-
-    // 분류 기본 점수
-    switch (info.classification) {
-      case 'HOSTILE':
-        score = 0.9;
-        break;
-      case 'UNKNOWN':
-        score = 0.5;
-        break;
-      case 'CIVIL':
-        score = 0.2;
-        break;
-      case 'FRIENDLY':
-        score = 0.05;
-        break;
-    }
-
-    // 무장 여부 보정
-    if (info.armed === true) {
-      score = Math.min(1, score + 0.3);
-    }
-
-    // 신뢰도 적용
-    return score * info.confidence;
-  }
-
-  /**
-   * 기지 방향 접근 각도 계산 (1 = 직접 접근, 0 = 이탈)
-   */
-  private calculateApproachAngle(track: FusedTrack): number {
-    const dx = this.basePosition.x - track.position.x;
-    const dy = this.basePosition.y - track.position.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 1) return 0;
-
-    const ux = dx / dist;
-    const uy = dy / dist;
-
-    const speed = Math.sqrt(track.velocity.vx ** 2 + track.velocity.vy ** 2);
-    if (speed < 0.1) return 0;
-
-    const vx = track.velocity.vx / speed;
-    const vy = track.velocity.vy / speed;
-
-    // 내적: 1이면 직접 접근, -1이면 이탈
-    const dot = vx * ux + vy * uy;
-    return clamp((dot + 1) / 2, 0, 1);
-  }
-
-  /**
-   * 위협 레벨 결정
-   */
-  private getThreatLevel(score: number): 'INFO' | 'CAUTION' | 'DANGER' | 'CRITICAL' {
-    if (score >= 80) return 'CRITICAL';
-    if (score >= 60) return 'DANGER';
-    if (score >= 35) return 'CAUTION';
-    return 'INFO';
-  }
 
   // ============================================
   // 품질 계산

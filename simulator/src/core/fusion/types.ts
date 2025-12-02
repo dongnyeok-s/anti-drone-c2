@@ -262,13 +262,20 @@ export interface FusionConfig {
 // 기본 설정값
 // ============================================
 
+/**
+ * 센서 가중치 설정
+ * 
+ * Radar = 0.6 (위치 정확, 분류 불가)
+ * Audio = 0.3 (방향만, 존재 확인)
+ * EO = 0.9 (분류 가능, 가장 신뢰)
+ */
 export const DEFAULT_SENSOR_WEIGHTS: SensorWeights = {
-  radarExistence: 0.6,
-  radarPosition: 0.7,
-  audioExistence: 0.3,
-  audioBearing: 0.3,
-  eoExistence: 0.9,
-  eoClassification: 0.9,
+  radarExistence: 0.6,   // 레이더 존재 확률 기여도
+  radarPosition: 0.7,    // 레이더 위치 정확도
+  audioExistence: 0.3,   // 음향 존재 확률 기여도
+  audioBearing: 0.25,    // 음향 방향 정확도 (조금 낮춤)
+  eoExistence: 0.9,      // EO 존재 확률 기여도 (가장 높음)
+  eoClassification: 0.9, // EO 분류 신뢰도
 };
 
 export const DEFAULT_TRACK_MATCHING: TrackMatchingConfig = {

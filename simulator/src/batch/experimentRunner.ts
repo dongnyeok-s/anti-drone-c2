@@ -28,6 +28,8 @@ export interface ExperimentConfig {
   engageDistanceThreshold: number;
   /** 유도 모드 (PN 또는 PURE_PURSUIT) */
   guidanceMode: GuidanceMode;
+  /** 센서 융합 활성화 */
+  fusionEnabled: boolean;
 }
 
 export interface ExperimentResult {
@@ -61,6 +63,7 @@ export class ExperimentRunner {
       autoEngage: config.autoEngage ?? true,
       engageDistanceThreshold: config.engageDistanceThreshold ?? 300,
       guidanceMode: config.guidanceMode ?? 'PN',  // 기본값: PN 유도
+      fusionEnabled: config.fusionEnabled ?? true,  // 기본값: 센서 융합 활성화
     };
   }
 
@@ -74,6 +77,7 @@ export class ExperimentRunner {
     console.log(`   실험당 시간: ${this.config.experimentDuration}초`);
     console.log(`   자동 교전: ${this.config.autoEngage ? 'ON' : 'OFF'}`);
     console.log(`   유도 모드: ${this.config.guidanceMode === 'PN' ? '비례 항법 (PN)' : '직선 추격'}`);
+    console.log(`   센서 융합: ${this.config.fusionEnabled ? 'ON' : 'OFF'}`);
     console.log('='.repeat(60));
 
     for (let i = 0; i < this.config.numExperiments; i++) {
@@ -116,7 +120,14 @@ export class ExperimentRunner {
     generator.save(scenario);
 
     // 카운터 초기화
-    const counters = {
+    const counters: {
+      radarDetections: number;
+      engageCommands: number;
+      interceptAttempts: number;
+      interceptSuccesses: number;
+      interceptFailures: number;
+      engagedDrones?: Set<string>;
+    } = {
       radarDetections: 0,
       engageCommands: 0,
       interceptAttempts: 0,
@@ -127,28 +138,38 @@ export class ExperimentRunner {
     // 시뮬레이션 초기화 (이벤트 콜백 포함)
     const simulation = new SimulationEngine((event: SimulatorToC2Event) => {
       // 이벤트별 카운터 업데이트
-      switch (event.type) {
-        case 'radar_detection':
-          counters.radarDetections++;
-          // 자동 교전 로직
-          if (this.config.autoEngage && event.range <= this.config.engageDistanceThreshold) {
-            simulation.handleEngageCommand(event.drone_id, undefined, 'auto', 'RAM', this.config.guidanceMode);
-            counters.engageCommands++;
-          }
-          break;
-        case 'intercept_result':
-          counters.interceptAttempts++;
-          if (event.result === 'SUCCESS') {
-            counters.interceptSuccesses++;
-          } else {
-            counters.interceptFailures++;
-          }
-          break;
+      if (event.type === 'radar_detection') {
+        counters.radarDetections++;
+      } else if (event.type === 'intercept_result') {
+        counters.interceptAttempts++;
+        if (event.result === 'SUCCESS') {
+          counters.interceptSuccesses++;
+        } else {
+          counters.interceptFailures++;
+        }
+      } else if (event.type === 'interceptor_update' && (event as any).target_id) {
+        // 인터셉터가 타겟을 추적하기 시작하면 교전으로 카운트
+        const interceptorEvent = event as any;
+        if (interceptorEvent.state === 'PURSUING' && !counters.engagedDrones?.has(interceptorEvent.target_id)) {
+          counters.engageCommands++;
+          if (!counters.engagedDrones) counters.engagedDrones = new Set();
+          counters.engagedDrones.add(interceptorEvent.target_id);
+        }
       }
     });
 
     // 유도 모드 설정
     simulation.setDefaultGuidanceMode(this.config.guidanceMode);
+
+    // 센서 융합 설정
+    simulation.setFusionEnabled(this.config.fusionEnabled);
+
+    // 자동 교전 활성화
+    if (this.config.autoEngage) {
+      simulation.setAutoEngageEnabled(true);
+      // Fusion 모드면 FUSION, 아니면 BASELINE
+      simulation.setEngagementMode(this.config.fusionEnabled ? 'FUSION' : 'BASELINE');
+    }
 
     // 시나리오 로드
     simulation.loadScenario(scenario.id);
@@ -282,17 +303,21 @@ async function main() {
 🔬 대드론 C2 시뮬레이션 실험 데이터 생성기
 
 사용법:
-  npx ts-node src/batch/experimentRunner.ts [실험횟수] [실험시간(초)] [시작시드] [유도모드]
+  npx ts-node src/batch/experimentRunner.ts [실험횟수] [실험시간(초)] [시작시드] [유도모드] [센서융합]
 
 예시:
-  npx ts-node src/batch/experimentRunner.ts 10 60                 # 10회 실험, PN 유도
-  npx ts-node src/batch/experimentRunner.ts 50 120 12345          # 50회 실험, 시드 12345, PN 유도
-  npx ts-node src/batch/experimentRunner.ts 30 60 12345 PN        # 30회 실험, PN 유도
-  npx ts-node src/batch/experimentRunner.ts 30 60 12345 PURE_PURSUIT  # 30회 실험, 직선 추격
+  npx ts-node src/batch/experimentRunner.ts 10 60                    # 10회, PN, 융합 ON
+  npx ts-node src/batch/experimentRunner.ts 30 60 12345              # 30회, 시드 12345
+  npx ts-node src/batch/experimentRunner.ts 30 60 12345 PN FUSION    # 융합 ON (기본값)
+  npx ts-node src/batch/experimentRunner.ts 30 60 12345 PN BASELINE  # 융합 OFF
 
 유도 모드:
   PN           - Proportional Navigation (비례 항법) - 기본값
   PURE_PURSUIT - 직선 추격 (기존 방식)
+
+센서 융합:
+  FUSION   - 센서 융합 활성화 (기본값)
+  BASELINE - 센서 융합 비활성화 (Baseline 실험)
 
 출력:
   - logs/*.jsonl    : 각 실험의 상세 이벤트 로그
@@ -305,14 +330,22 @@ async function main() {
   const guidanceModeArg = args[3]?.toUpperCase();
   const guidanceMode: GuidanceMode = guidanceModeArg === 'PURE_PURSUIT' ? 'PURE_PURSUIT' : 'PN';
   
+  // 센서 융합 모드 파싱
+  const fusionArg = args[4]?.toUpperCase();
+  const fusionEnabled = fusionArg !== 'BASELINE';  // BASELINE이면 비활성화
+  
+  // 로그 이름 접두사 (fusion 모드에 따라)
+  const namePrefix = fusionEnabled ? 'fusion' : 'baseline';
+  
   const config: Partial<ExperimentConfig> = {
     numExperiments: parseInt(args[0]) || 10,
     experimentDuration: parseInt(args[1]) || 60,
     baseSeed: args[2] ? parseInt(args[2]) : undefined,
-    namePrefix: 'batch',
+    namePrefix,
     autoEngage: true,
     engageDistanceThreshold: 300,
     guidanceMode,
+    fusionEnabled,
   };
 
   console.log('\n🔬 대드론 C2 시뮬레이션 실험 데이터 생성기\n');

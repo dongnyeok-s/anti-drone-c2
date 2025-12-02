@@ -31,18 +31,18 @@ export interface AcousticSensorConfig {
 }
 
 export const DEFAULT_ACOUSTIC_CONFIG: AcousticSensorConfig = {
-  detection_range: 1000,
-  min_detection_range: 50,
-  base_detection_prob: 0.6,
-  takeoff_boost: 0.3,        // 이륙 시 +30%
-  approach_boost: 0.2,       // 접근 시 +20%
-  false_alarm_rate: 0.01,    // 1%
-  miss_probability: 0.1,     // 10%
-  detection_delay_mean: 0.5,
-  detection_delay_std: 0.2,
-  confidence_noise: 0.1,
-  bearing_noise_sigma: 10,   // 방위각 오차 ±10도
-  distance_noise_sigma: 50,  // 거리 오차 ±50m
+  detection_range: 500,        // 500m 탐지 범위
+  min_detection_range: 30,     // 30m 최소 거리
+  base_detection_prob: 0.35,   // 35% 기본 확률 (증가)
+  takeoff_boost: 0.35,         // 이륙 시 +35%
+  approach_boost: 0.25,        // 접근 시 +25%
+  false_alarm_rate: 0.003,     // 0.3% (감소)
+  miss_probability: 0.03,      // 3% (감소)
+  detection_delay_mean: 0.15,  // 더 빠른 반응
+  detection_delay_std: 0.08,
+  confidence_noise: 0.08,
+  bearing_noise_sigma: 6,      // 방위각 오차 ±6도 (개선)
+  distance_noise_sigma: 25,    // 거리 오차 ±25m (개선)
 };
 
 // ============================================
@@ -53,10 +53,11 @@ export class AcousticSensor {
   private config: AcousticSensorConfig;
   private sensorPosition: Position3D;
   private lastScanTime: number = 0;
-  private scanInterval: number = 2; // 2초마다 스캔
+  private scanInterval: number = 0.5; // 0.5초마다 스캔 (더 자주)
   private detectedDrones: Set<string> = new Set();
   private pendingDetections: Map<string, number> = new Map(); // 드론ID -> 탐지 예정 시간
   private enabled: boolean = true;
+  private lastDetectionTime: Map<string, number> = new Map(); // 중복 탐지 방지
 
   constructor(
     sensorPosition: Position3D,
@@ -153,6 +154,11 @@ export class AcousticSensor {
 
   /**
    * 탐지 확률 계산
+   * 
+   * 거리 기반 탐지 확률:
+   * - 0~100m: 높은 확률 (80~95%)
+   * - 100~300m: 중간 확률 (40~80%)
+   * - 300~500m: 낮은 확률 (20~40%)
    */
   private calculateDetectionProbability(
     drone: HostileDrone,
@@ -162,23 +168,49 @@ export class AcousticSensor {
     
     // 범위 밖
     if (distance > this.config.detection_range) return 0;
+    
+    // 매우 가까운 경우 높은 확률
     if (distance < this.config.min_detection_range) return 0.95;
     
-    // 거리에 따른 기본 확률 (역제곱 법칙 근사)
-    const distanceFactor = 1 - (distance / this.config.detection_range) ** 1.5;
-    let prob = this.config.base_detection_prob * distanceFactor;
+    // 거리에 따른 기본 확률 (신뢰도 = max(0, 1 - dist/500))
+    // 더 가까울수록 높은 확률, 멀수록 낮은 확률
+    let distanceConfidence = Math.max(0, 1 - distance / this.config.detection_range);
     
-    // 상태별 부스트
+    // 거리별 탐지 확률 조정 (크게 향상)
+    let baseProbability: number;
+    if (distance < 100) {
+      // 100m 이내: 45~55% 확률 (매 틱마다)
+      baseProbability = 0.45 + 0.10 * (1 - distance / 100);
+    } else if (distance < 300) {
+      // 100~300m: 30~45% 확률
+      baseProbability = 0.30 + 0.15 * (1 - (distance - 100) / 200);
+    } else {
+      // 300~500m: 15~30% 확률
+      baseProbability = 0.15 + 0.15 * (1 - (distance - 300) / 200);
+    }
+    
+    let prob = baseProbability * distanceConfidence;
+    
+    // 상태별 부스트 (더 큰 영향)
     if (state === 'TAKEOFF') {
-      prob += this.config.takeoff_boost;
+      prob += this.config.takeoff_boost * 1.5;  // 이륙 시 크게 증가
     } else if (state === 'APPROACH') {
-      prob += this.config.approach_boost;
+      prob += this.config.approach_boost * 1.2;  // 접근 시 증가
+    } else if (state === 'HOVER' || state === 'LOITER') {
+      prob += 0.15;  // 호버링/배회 시 보너스
     }
     
     // 미탐 확률 적용
     prob *= (1 - this.config.miss_probability);
     
-    return Math.min(0.95, Math.max(0, prob));
+    return Math.min(0.95, Math.max(0.05, prob));
+  }
+  
+  /**
+   * 거리 기반 탐지 신뢰도 계산
+   */
+  calculateConfidenceByDistance(distance: number): number {
+    return Math.max(0.1, 1 - distance / this.config.detection_range);
   }
 
   /**

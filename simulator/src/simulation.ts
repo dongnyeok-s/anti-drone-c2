@@ -24,6 +24,7 @@ import {
 import { SimulationWorld, HostileDrone, InterceptorDrone, Position3D } from './types';
 import { RadarSensor } from './sensors/radar';
 import { AcousticSensor } from './sensors/acousticSensor';
+import { EOSensor, EODetectionEvent } from './sensors/eoSensor';
 import { createHostileDrone, updateHostileDrone, setDroneBehavior } from './models/hostileDrone';
 import { 
   createInterceptor, 
@@ -38,12 +39,22 @@ import { getLogger, ExperimentLogger } from './core/logging/logger';
 import { GeneratedScenario, getGenerator } from './core/scenario/generator';
 import * as LogEvents from './core/logging/eventSchemas';
 import { SensorFusion, SensorObservation, FusedTrack } from './core/fusion';
+import { 
+  EngagementManager, 
+  EngagementMode, 
+  EngagementDecision,
+  EngageStartLogEvent,
+  EngageEndLogEvent,
+  AbortReason,
+} from './core/engagement';
 
 export class SimulationEngine {
   private world: SimulationWorld;
   private radarSensor: RadarSensor;
   private acousticSensor: AcousticSensor;
+  private eoSensor: EOSensor;  // EO 카메라 센서
   private sensorFusion: SensorFusion;
+  private engagementManager: EngagementManager;  // 교전 관리자
   private eventQueue: SimulatorToC2Event[] = [];
   private onEvent: (event: SimulatorToC2Event) => void;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -52,6 +63,7 @@ export class SimulationEngine {
   private evadingDrones: Set<string> = new Set();  // 회피 중인 드론 추적
   private defaultGuidanceMode: GuidanceMode = 'PN';  // 기본 유도 모드
   private fusionEnabled: boolean = true;  // 센서 융합 활성화 여부
+  private autoEngageEnabled: boolean = false;  // 자동 교전 활성화 여부
 
   constructor(onEvent: (event: SimulatorToC2Event) => void) {
     this.onEvent = onEvent;
@@ -72,7 +84,15 @@ export class SimulationEngine {
 
     this.radarSensor = new RadarSensor(basePosition, this.world.radarConfig);
     this.acousticSensor = new AcousticSensor(basePosition);
+    this.eoSensor = new EOSensor(basePosition, {
+      maxRange: 350,          // 350m 이내 탐지
+      detectionInterval: 1.0, // 1.0초 간격 (더 자주)
+      baseDetectionProb: 0.7, // 70% 기본 확률
+      hostileAccuracy: 0.92,  // HOSTILE → HOSTILE 92%
+      civilAccuracy: 0.85,    // CIVIL → CIVIL 85%
+    });
     this.sensorFusion = new SensorFusion(basePosition);
+    this.engagementManager = new EngagementManager();  // 교전 관리자 초기화
   }
 
   /**
@@ -549,7 +569,20 @@ export class SimulationEngine {
       });
     }
 
-    // 6. 주기적 상태 이벤트 (5초마다)
+    // 5.5 EO 카메라 센서 스캔 (300m 이내 드론에 대해)
+    if (this.fusionEnabled) {
+      this.processEOSensorScan();
+    }
+
+    // 6. 자동 교전 의사결정 (Threat 기반)
+    if (this.autoEngageEnabled) {
+      this.processAutoEngagement();
+    }
+
+    // 7. 교전 중단 조건 확인
+    this.checkEngagementAbortConditions();
+
+    // 8. 주기적 상태 이벤트 (5초마다)
     if (Math.floor(this.world.time) % 5 === 0 && this.world.time % 1 < deltaTime) {
       this.emitStatusEvent();
     }
@@ -621,22 +654,47 @@ export class SimulationEngine {
     
     this.onEvent(event);
 
-    // 주기적 로깅 (매번 로깅하면 너무 많음)
-    if (Math.random() < 0.1) {
+    // 주기적 로깅 (50% 확률, 중요 이벤트는 항상 로깅)
+    const shouldLog = Math.random() < 0.5 || 
+                      track.sensors.eoSeen ||  // EO 탐지 시 항상 로깅
+                      track.threatScore >= 70; // 고위협 트랙 항상 로깅
+    if (shouldLog) {
       this.logger.log({
         timestamp: this.world.time,
         event: 'fused_track_update' as const,
         track_id: track.id,
         drone_id: track.droneId || undefined,
-        existence_prob: track.existenceProb,
-        threat_score: track.threatScore,
+        // 존재 확률
+        existence_prob: Math.round(track.existenceProb * 1000) / 1000,
+        // 융합된 위치
+        fused_position: {
+          x: Math.round(track.position.x * 10) / 10,
+          y: Math.round(track.position.y * 10) / 10,
+          altitude: Math.round(track.position.altitude * 10) / 10,
+        },
+        // 융합된 속도
+        fused_velocity: {
+          vx: Math.round(track.velocity.vx * 10) / 10,
+          vy: Math.round(track.velocity.vy * 10) / 10,
+          climbRate: Math.round(track.velocity.climbRate * 10) / 10,
+        },
+        // 융합된 분류
+        fused_classification: track.classificationInfo.classification,
+        class_confidence: Math.round(track.classificationInfo.confidence * 1000) / 1000,
+        armed: track.classificationInfo.armed,
+        // 융합된 위협 점수
+        fused_threat_score: track.threatScore,
         threat_level: track.threatLevel,
+        // 센서 상태
         sensors: {
           radar: track.sensors.radarSeen,
           audio: track.sensors.audioHeard,
           eo: track.sensors.eoSeen,
         },
-        quality: track.quality,
+        // 품질 점수
+        quality: Math.round(track.quality * 1000) / 1000,
+        // 행동 상태
+        is_evading: track.isEvading,
       } as any);
     }
   }
@@ -649,7 +707,9 @@ export class SimulationEngine {
     target: HostileDrone,
     result: string
   ): void {
-    if (result === 'SUCCESS') {
+    const success = result === 'SUCCESS';
+    
+    if (success) {
       const updated = { ...target, isNeutralized: true };
       this.world.hostileDrones.set(target.id, updated);
       
@@ -658,6 +718,9 @@ export class SimulationEngine {
         this.sensorFusion.setTrackNeutralized(target.id, true);
       }
     }
+
+    // 교전 완료 처리
+    this.completeEngagementForDrone(target.id, success);
 
     const event: InterceptResultEvent = {
       type: 'intercept_result',
@@ -1045,5 +1108,414 @@ export class SimulationEngine {
     });
     
     return result;
+  }
+
+  // ============================================
+  // EO 카메라 센서 스캔
+  // ============================================
+
+  /**
+   * EO 카메라 센서 스캔 처리
+   * EOSensor 모듈을 사용하여 300m 이내 드론 탐지
+   */
+  private processEOSensorScan(): void {
+    const currentTime = this.world.time;
+
+    // EOSensor로 드론 스캔
+    const eoEvents = this.eoSensor.scan(currentTime, this.world.hostileDrones);
+
+    eoEvents.forEach(event => {
+      // SensorObservation으로 변환
+      const observation = EOSensor.toObservation(event);
+
+      // 센서 융합 처리
+      this.processObservation(observation);
+
+      // EO 탐지 이벤트 전송 (C2 UI로)
+      this.onEvent({
+        type: 'eo_detection',
+        timestamp: event.timestamp,
+        drone_id: event.drone_id,
+        bearing: event.bearing,
+        range: event.range,
+        altitude: event.altitude,
+        classification: event.classification,
+        confidence: event.confidence,
+        class_confidence: event.class_confidence,
+        armed: event.armed,
+        size_class: event.size_class,
+        drone_type: event.drone_type,
+        is_first_detection: event.is_first_detection,
+      } as any);
+
+      // 상세 로깅 (EO 탐지 이벤트)
+      this.logger.log({
+        timestamp: currentTime,
+        event: 'eo_detection' as const,
+        drone_id: event.drone_id,
+        bearing: event.bearing,
+        range: event.range,
+        altitude: event.altitude,
+        classification: event.classification as LogEvents.Classification,
+        class_confidence: event.class_confidence,
+        confidence: event.confidence,
+        armed: event.armed,
+        size_class: event.size_class as LogEvents.DroneSize ?? undefined,
+        drone_type: event.drone_type as LogEvents.DroneType ?? undefined,
+        is_first_detection: event.is_first_detection,
+        sensor: 'EO',
+      } as any);
+
+      // eo_confirmation 이벤트도 기록 (기존 호환성)
+      this.logger.log({
+        timestamp: currentTime,
+        event: 'eo_confirmation',
+        drone_id: event.drone_id,
+        interceptor_id: 'AUTO_EO',
+        classification: event.classification as LogEvents.Classification,
+        armed: event.armed,
+        size_class: event.size_class as LogEvents.DroneSize ?? undefined,
+        drone_type: event.drone_type as LogEvents.DroneType ?? undefined,
+        confidence: event.confidence,
+        class_confidence: event.class_confidence,
+        sensor: 'EO',
+      });
+    });
+  }
+
+  // ============================================
+  // 자동 교전 의사결정 시스템
+  // ============================================
+
+  /**
+   * 자동 교전 활성화/비활성화
+   */
+  setAutoEngageEnabled(enabled: boolean): void {
+    this.autoEngageEnabled = enabled;
+    console.log(`[SimulationEngine] 자동 교전 ${enabled ? '활성화' : '비활성화'}`);
+  }
+
+  /**
+   * 교전 모드 설정 (BASELINE or FUSION)
+   */
+  setEngagementMode(mode: EngagementMode): void {
+    this.engagementManager.setMode(mode);
+    console.log(`[SimulationEngine] 교전 모드 변경: ${mode}`);
+  }
+
+  /**
+   * 교전 모드 반환
+   */
+  getEngagementMode(): EngagementMode {
+    return this.engagementManager.getMode();
+  }
+
+  /**
+   * 자동 교전 처리
+   */
+  private processAutoEngagement(): void {
+    const basePos = { x: this.world.basePosition.x, y: this.world.basePosition.y };
+    const mode = this.engagementManager.getMode();
+
+    if (mode === 'FUSION' && this.fusionEnabled) {
+      // Fusion 모드: 트랙 기반 교전
+      const tracks = this.sensorFusion.getAllTracks();
+      const decisions = this.engagementManager.evaluateEngagementCandidates(
+        tracks,
+        this.world.time,
+        basePos
+      );
+
+      for (const decision of decisions) {
+        if (decision.action === 'ENGAGE') {
+          this.executeEngageDecision(decision);
+        }
+      }
+    } else {
+      // Baseline 모드: 드론 직접 기반 교전
+      this.processBaselineAutoEngagement();
+    }
+  }
+
+  /**
+   * Baseline 모드 자동 교전 (레이더 거리 기반)
+   */
+  private processBaselineAutoEngagement(): void {
+    const config = this.engagementManager.getConfig();
+    const basePos = this.world.basePosition;
+
+    for (const [droneId, drone] of this.world.hostileDrones) {
+      if (drone.isNeutralized) continue;
+
+      // 거리 계산
+      const dx = drone.position.x - basePos.x;
+      const dy = drone.position.y - basePos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      // 거리 기반 교전 조건
+      if (distance <= config.BASELINE_ENGAGE_DISTANCE) {
+        // 이미 교전 중인지 확인
+        const track = this.sensorFusion.getTrackByDroneId(droneId);
+        const trackId = track?.id || `baseline_${droneId}`;
+        const info = this.engagementManager.getEngagementInfo(trackId);
+        
+        if (info && (info.state === 'ENGAGING' || info.state === 'COMPLETED')) {
+          continue;
+        }
+
+        // 랜덤 확률 적용
+        if (Math.random() < config.BASELINE_ENGAGE_PROBABILITY) {
+          // 사용 가능한 인터셉터 찾기
+          const availableInterceptor = this.findAvailableInterceptor();
+          if (!availableInterceptor) continue;
+
+          // 간단한 교전 결정 생성
+          const decision: EngagementDecision = {
+            trackId,
+            action: 'ENGAGE',
+            reason: `거리 ${distance.toFixed(0)}m ≤ ${config.BASELINE_ENGAGE_DISTANCE}m (Baseline)`,
+            priorityScore: 1000 - distance,
+            threatScore: 0,
+            existenceProb: 1,
+            distance,
+            classification: 'UNKNOWN',
+            classConfidence: 0,
+            sensors: { radar: true, audio: false, eo: false },
+          };
+
+          // 교전 개시
+          const engageInfo = this.engagementManager.startEngagement(
+            trackId,
+            availableInterceptor.id,
+            decision,
+            this.world.time
+          );
+
+          // 인터셉터 발진
+          const launched = launchInterceptor(
+            availableInterceptor as ExtendedInterceptorDrone,
+            droneId,
+            this.world.time,
+            'RAM',
+            this.defaultGuidanceMode
+          );
+          this.world.interceptors.set(launched.id, launched);
+
+          // 로깅
+          this.logger.log({
+            timestamp: this.world.time,
+            event: 'engage_start',
+            track_id: trackId,
+            drone_id: droneId,
+            mode: 'BASELINE',
+            threat_score: 0,
+            existence_prob: 1,
+            distance_to_base: distance,
+            classification: 'UNKNOWN',
+            class_confidence: 0,
+            engage_reason: decision.reason,
+            interceptor_id: availableInterceptor.id,
+          } as any);
+
+          this.logger.log({
+            timestamp: this.world.time,
+            event: 'engage_command',
+            drone_id: droneId,
+            method: 'RAM' as LogEvents.InterceptMethod,
+            guidance_mode: this.defaultGuidanceMode,
+            interceptor_id: availableInterceptor.id,
+            issued_by: 'auto',
+            engage_mode: 'BASELINE',
+          } as any);
+
+          // 인터셉터 생성 이벤트
+          this.onEvent({
+            type: 'interceptor_spawned',
+            timestamp: this.world.time,
+            interceptor_id: launched.id,
+            position: launched.position,
+            target_id: droneId,
+          } as any);
+
+          this.logger.log({
+            timestamp: this.world.time,
+            event: 'interceptor_spawned',
+            interceptor_id: launched.id,
+            position: launched.position,
+            target_id: droneId,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * 교전 결정 실행
+   */
+  private executeEngageDecision(decision: EngagementDecision): void {
+    const track = this.sensorFusion.getTrack(decision.trackId);
+    if (!track) return;
+
+    // 드론 ID 가져오기
+    const droneId = track.droneId;
+    if (!droneId) return;
+
+    // 드론 존재 확인
+    const drone = this.world.hostileDrones.get(droneId);
+    if (!drone || drone.isNeutralized) return;
+
+    // 사용 가능한 인터셉터 찾기
+    const availableInterceptor = this.findAvailableInterceptor();
+    if (!availableInterceptor) return;
+
+    // 교전 개시
+    const info = this.engagementManager.startEngagement(
+      decision.trackId,
+      availableInterceptor.id,
+      decision,
+      this.world.time
+    );
+
+    // 인터셉터 발진
+    const launched = launchInterceptor(
+      availableInterceptor as ExtendedInterceptorDrone,
+      droneId,
+      this.world.time,
+      'RAM',
+      this.defaultGuidanceMode
+    );
+    this.world.interceptors.set(launched.id, launched);
+
+    // 교전 개시 로그 이벤트
+    const startLog = this.engagementManager.createEngageStartLog(
+      info,
+      decision,
+      droneId,
+      this.world.time
+    );
+
+    // 로깅
+    this.logger.log(startLog as any);
+
+    // 기존 engage_command 로그도 유지 (호환성)
+    this.logger.log({
+      timestamp: this.world.time,
+      event: 'engage_command',
+      drone_id: droneId,
+      method: 'RAM' as LogEvents.InterceptMethod,
+      guidance_mode: this.defaultGuidanceMode,
+      interceptor_id: availableInterceptor.id,
+      issued_by: 'auto',
+      threat_score: decision.threatScore,
+      existence_prob: decision.existenceProb,
+      engage_mode: this.engagementManager.getMode(),
+    } as any);
+
+    // 인터셉터 생성 이벤트
+    this.onEvent({
+      type: 'interceptor_spawned',
+      timestamp: this.world.time,
+      interceptor_id: launched.id,
+      position: launched.position,
+      target_id: droneId,
+    } as any);
+
+    this.logger.log({
+      timestamp: this.world.time,
+      event: 'interceptor_spawned',
+      interceptor_id: launched.id,
+      position: launched.position,
+      target_id: droneId,
+    });
+  }
+
+  /**
+   * 사용 가능한 인터셉터 찾기
+   */
+  private findAvailableInterceptor(): InterceptorDrone | null {
+    for (const [, interceptor] of this.world.interceptors) {
+      if (interceptor.state === 'IDLE' || interceptor.state === 'STANDBY') {
+        return interceptor;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 교전 중단 조건 확인
+   */
+  private checkEngagementAbortConditions(): void {
+    const basePos = { x: this.world.basePosition.x, y: this.world.basePosition.y };
+
+    for (const info of this.engagementManager.getAllEngagementInfos()) {
+      if (info.state !== 'ENGAGING') continue;
+
+      const track = this.sensorFusion.getTrack(info.trackId);
+      const abortReason = this.engagementManager.checkAbortConditions(
+        info.trackId,
+        track || null,
+        basePos
+      );
+
+      if (abortReason) {
+        this.abortEngagement(info.trackId, abortReason, track?.droneId || null);
+      }
+    }
+  }
+
+  /**
+   * 교전 중단 처리
+   */
+  private abortEngagement(trackId: string, reason: AbortReason, droneId: string | null): void {
+    const info = this.engagementManager.abortEngagement(trackId, reason, this.world.time);
+    if (!info) return;
+
+    // 인터셉터 리셋 (있는 경우)
+    if (info.assignedInterceptorId) {
+      const interceptor = this.world.interceptors.get(info.assignedInterceptorId);
+      if (interceptor) {
+        const reset = resetInterceptor(
+          interceptor as ExtendedInterceptorDrone,
+          this.world.basePosition
+        );
+        this.world.interceptors.set(interceptor.id, reset);
+      }
+    }
+
+    // 교전 종료 로그
+    const endLog = this.engagementManager.createEngageEndLog(info, droneId, this.world.time);
+    this.logger.log(endLog as any);
+
+    console.log(`[EngagementManager] 교전 중단: ${trackId}, 사유: ${reason}`);
+  }
+
+  /**
+   * 교전 완료 처리 (요격 성공/실패 시 호출)
+   */
+  completeEngagementForDrone(droneId: string, success: boolean): void {
+    // 드론 ID로 트랙 찾기
+    const track = this.sensorFusion.getTrackByDroneId(droneId);
+    if (!track) return;
+
+    const info = this.engagementManager.completeEngagement(track.id, success, this.world.time);
+    if (!info) return;
+
+    // 교전 종료 로그
+    const endLog = this.engagementManager.createEngageEndLog(info, droneId, this.world.time);
+    this.logger.log(endLog as any);
+  }
+
+  /**
+   * 교전 관리자 반환
+   */
+  getEngagementManager(): EngagementManager {
+    return this.engagementManager;
+  }
+
+  /**
+   * 리셋 시 교전 관리자도 리셋
+   */
+  resetEngagement(): void {
+    this.engagementManager.reset();
   }
 }
