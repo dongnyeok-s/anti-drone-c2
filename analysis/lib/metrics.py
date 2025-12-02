@@ -8,7 +8,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
-from loader import ExperimentData, filter_events
+from .loader import ExperimentData, filter_events
 
 
 @dataclass

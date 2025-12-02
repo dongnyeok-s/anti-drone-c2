@@ -9,12 +9,12 @@ import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from loader import load_all_experiments
-from metrics import calculate_all_metrics
-from summarize import generate_summary, generate_improvement_points
+from .loader import load_all_experiments
+from .metrics import calculate_all_metrics
+from .summarize import generate_summary, generate_improvement_points
 
 try:
-    from plots import (
+    from .plots import (
         create_full_report_figure, 
         create_summary_card,
         HAS_MATPLOTLIB
