@@ -1,0 +1,21 @@
+{
+  "threat_engage_threshold": 80.9,
+  "threat_abort_threshold": 34.96,
+  "civil_conf_threshold": 0.668,
+  "pn_nav_constant": 3.47,
+  "pn_max_turn_rate": 2.75,
+  "pn_min_closing_speed": 7.3,
+  "interceptor_turn_rate_multiplier": 1.0,
+  "sensor_radar_weight": 0.551,
+  "sensor_audio_weight": 0.267,
+  "sensor_eo_weight": 0.775,
+  "threat_weights": {
+    "existence": 0.11329164650448113,
+    "classification": 0.243154485100276,
+    "distance": 0.2300837295605695,
+    "velocity": 0.12100786919681218,
+    "behavior": 0.08611026461854415,
+    "armed": 0.10423273568264885,
+    "heading": 0.10211926933666808
+  }
+}

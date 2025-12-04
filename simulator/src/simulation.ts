@@ -245,7 +245,8 @@ export class SimulationEngine {
         position: drone.position,
         velocity: drone.velocity,
         behavior: drone.behavior,
-        is_hostile: true,
+        is_hostile: drone.is_hostile ?? true,
+        true_label: drone.true_label,  // Ground truth 레이블 포함
       });
     });
 
@@ -267,10 +268,19 @@ export class SimulationEngine {
         droneData.velocity,
         droneData.behavior,
         droneData.config,
-        droneData.target_position
+        droneData.target_position,
+        droneData.true_label  // Ground truth 레이블 포함
       );
-      // ID 덮어쓰기
-      const droneWithId = { ...drone, id: droneData.id };
+      // ID 및 확장 속성 덮어쓰기
+      const droneWithId = { 
+        ...drone, 
+        id: droneData.id,
+        is_hostile: droneData.is_hostile,
+        drone_type: droneData.drone_type,
+        armed: droneData.armed,
+        size_class: droneData.size_class,
+        recommended_method: droneData.recommended_method || undefined,  // null을 undefined로 변환
+      };
       this.world.hostileDrones.set(droneData.id, droneWithId);
     });
 
@@ -293,14 +303,18 @@ export class SimulationEngine {
       { x: 600, y: 500, altitude: 80 },
       { vx: -12, vy: -10, climbRate: -0.5 },
       'NORMAL',
-      DEFAULT_HOSTILE_DRONE_CONFIG
+      DEFAULT_HOSTILE_DRONE_CONFIG,
+      undefined,
+      'HOSTILE'  // Ground truth 레이블
     );
     
     const hostile2 = createHostileDrone(
       { x: -400, y: 200, altitude: 120 },
       { vx: 5, vy: 8, climbRate: 0 },
       'NORMAL',
-      DEFAULT_HOSTILE_DRONE_CONFIG
+      DEFAULT_HOSTILE_DRONE_CONFIG,
+      undefined,
+      'CIVIL'  // Ground truth 레이블
     );
     
     const hostile3 = createHostileDrone(
@@ -308,7 +322,8 @@ export class SimulationEngine {
       { vx: 0, vy: 5, climbRate: 0 },
       'RECON',
       DEFAULT_HOSTILE_DRONE_CONFIG,
-      { x: 0, y: 0, altitude: 150 }
+      { x: 0, y: 0, altitude: 150 },
+      'HOSTILE'  // Ground truth 레이블
     );
 
     this.world.hostileDrones.set(hostile1.id, hostile1);
@@ -338,7 +353,9 @@ export class SimulationEngine {
         { x: dir.x, y: dir.y, altitude: 60 + i * 20 },
         { vx: dir.vx, vy: dir.vy, climbRate: 0 },
         'ATTACK_RUN',
-        DEFAULT_HOSTILE_DRONE_CONFIG
+        DEFAULT_HOSTILE_DRONE_CONFIG,
+        undefined,
+        'HOSTILE'  // Ground truth 레이블
       );
       this.world.hostileDrones.set(hostile.id, hostile);
     });
@@ -357,21 +374,27 @@ export class SimulationEngine {
       { x: 400, y: 300, altitude: 40 },
       { vx: -2, vy: -1.5, climbRate: 0 },
       'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 5 }
+      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 5 },
+      undefined,
+      'HOSTILE'  // Ground truth 레이블
     );
     
     const hostile2 = createHostileDrone(
       { x: -350, y: 400, altitude: 35 },
       { vx: 1.5, vy: -2, climbRate: 0.1 },
       'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 4 }
+      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 4 },
+      undefined,
+      'CIVIL'  // Ground truth 레이블
     );
-
+    
     const hostile3 = createHostileDrone(
       { x: 800, y: -200, altitude: 200 },
       { vx: -25, vy: 5, climbRate: -1 },
       'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 25 }
+      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 25 },
+      undefined,
+      'HOSTILE'  // Ground truth 레이블
     );
 
     this.world.hostileDrones.set(hostile1.id, hostile1);
@@ -612,13 +635,21 @@ export class SimulationEngine {
           confidence: result.event.confidence,
         });
         
+        // 드론 매칭 확인 및 true_label 가져오기
+        const matchedDrone = result.track.droneId 
+          ? this.world.hostileDrones.get(result.track.droneId) 
+          : null;
+        const trueLabel = matchedDrone?.true_label;
+        
         // 로깅 (타입 안전하게)
         this.logger.log({
           timestamp: this.world.time,
           event: 'track_created' as const,
           track_id: result.event.track_id,
+          drone_id: result.track.droneId || undefined,
           initial_sensor: result.event.initial_sensor,
           position: result.event.position,
+          true_label: trueLabel,
         } as any);
       } else {
         this.emitFusedTrackEvent(result.track);
@@ -630,6 +661,12 @@ export class SimulationEngine {
    * 융합 트랙 이벤트 전송
    */
   private emitFusedTrackEvent(track: FusedTrack): void {
+    // 드론 매칭 확인 및 true_label 가져오기
+    const matchedDrone = track.droneId 
+      ? this.world.hostileDrones.get(track.droneId) 
+      : null;
+    const trueLabel = matchedDrone?.true_label;
+    
     const event: FusedTrackUpdateEvent = {
       type: 'fused_track_update',
       timestamp: this.world.time,
@@ -672,6 +709,8 @@ export class SimulationEngine {
         drone_id: track.droneId || undefined,
         // 존재 확률
         existence_prob: Math.round(track.existenceProb * 1000) / 1000,
+        // Ground truth 레이블
+        true_label: trueLabel,
         // 융합된 위치
         fused_position: {
           x: Math.round(track.position.x * 10) / 10,

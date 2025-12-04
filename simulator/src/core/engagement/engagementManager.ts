@@ -28,6 +28,7 @@ import {
 } from './config';
 import { FusedTrack } from '../fusion/types';
 import { determineBehavior } from '../fusion/threatScore';
+import { loadRuntimeParams } from '../../config/runtimeParams';
 
 // ============================================
 // 교전 관리자 클래스
@@ -44,6 +45,27 @@ export class EngagementManager {
       ...FUSION_ENGAGEMENT_CONFIG,
       ...config,
     };
+    
+    // 런타임 파라미터 적용
+    this.applyRuntimeParams();
+  }
+  
+  /**
+   * 런타임 파라미터 적용
+   */
+  private applyRuntimeParams(): void {
+    const params = loadRuntimeParams();
+    if (!params) return;
+    
+    if (params.threat_engage_threshold !== undefined) {
+      this.config.THREAT_ENGAGE_THRESHOLD = params.threat_engage_threshold;
+    }
+    if (params.threat_abort_threshold !== undefined) {
+      this.config.THREAT_ABORT_THRESHOLD = params.threat_abort_threshold;
+    }
+    if (params.civil_conf_threshold !== undefined) {
+      this.config.CIVIL_EXCLUDE_CONFIDENCE = params.civil_conf_threshold;
+    }
   }
 
   /**

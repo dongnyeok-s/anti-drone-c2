@@ -13,12 +13,14 @@ export interface LoggerConfig {
   logsDir: string;
   enabled: boolean;
   consoleOutput: boolean;  // 콘솔에도 출력할지 여부
+  customFilename?: string;  // 커스텀 파일명 (선택사항)
 }
 
 const DEFAULT_CONFIG: LoggerConfig = {
   logsDir: './logs',
   enabled: true,
   consoleOutput: false,
+  customFilename: undefined,
 };
 
 export class ExperimentLogger {
@@ -81,8 +83,13 @@ export class ExperimentLogger {
     this.firstDetections.clear();
 
     // 파일 생성
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `${scenarioId}_${timestamp}.jsonl`;
+    let filename: string;
+    if (this.config.customFilename) {
+      filename = this.config.customFilename;
+    } else {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      filename = `${scenarioId}_${timestamp}.jsonl`;
+    }
     this.currentFile = path.join(this.config.logsDir, filename);
 
     if (this.config.enabled) {

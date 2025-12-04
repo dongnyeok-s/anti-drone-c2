@@ -72,12 +72,18 @@ export type DroneBehavior = 'NORMAL' | 'RECON' | 'ATTACK_RUN' | 'EVADE';
 // 시나리오 설정 타입
 // ============================================
 
+/** Ground truth 레이블 (정답 레이블) */
+export type TrueLabel = 'HOSTILE' | 'CIVIL' | 'UNKNOWN';
+
 export interface GeneratedDrone {
   id: string;
   position: { x: number; y: number; altitude: number };
   velocity: { vx: number; vy: number; climbRate: number };
   behavior: DroneBehavior;
   is_hostile: boolean;
+  
+  // Ground truth 레이블 (정답 레이블)
+  true_label: TrueLabel;
   
   // 확장 속성
   drone_type: DroneType;
@@ -161,6 +167,14 @@ export interface GeneratorConfig {
   armedRatioMin: number;
   armedRatioMax: number;
   acousticSensorProbability: number; // 음향 센서 활성화 확률
+  
+  // Ground truth 레이블 분포 설정
+  trueLabelDistribution?: {
+    hostile_ratio?: number;  // HOSTILE 비율 (0~1)
+    civil_ratio?: number;    // CIVIL 비율 (0~1)
+    unknown_ratio?: number;  // UNKNOWN 비율 (0~1)
+    // 합계가 1이 되지 않아도 됨 (정규화됨)
+  };
 }
 
 const DEFAULT_GENERATOR_CONFIG: GeneratorConfig = {
@@ -178,6 +192,12 @@ const DEFAULT_GENERATOR_CONFIG: GeneratorConfig = {
   armedRatioMin: 0.2,
   armedRatioMax: 0.8,
   acousticSensorProbability: 0.5,
+  // 기본 true_label 분포: 대부분 HOSTILE, 일부 CIVIL/UNKNOWN
+  trueLabelDistribution: {
+    hostile_ratio: 0.7,
+    civil_ratio: 0.2,
+    unknown_ratio: 0.1,
+  },
 };
 
 // ============================================
@@ -355,6 +375,50 @@ export class ScenarioGenerator {
   }
 
   /**
+   * true_label 할당 (Ground truth 레이블)
+   * 
+   * 시나리오별 trueLabelDistribution 설정을 우선 적용합니다.
+   * 설정이 없으면 드론 타입과 isHostile을 기반으로 추정합니다.
+   */
+  private assignTrueLabel(rng: SeededRandom, droneType: DroneType, isHostile: boolean): TrueLabel {
+    const dist = this.config.trueLabelDistribution;
+    
+    // trueLabelDistribution이 명시적으로 설정된 경우, 분포를 우선 적용
+    if (dist && (dist.hostile_ratio !== undefined || dist.civil_ratio !== undefined || dist.unknown_ratio !== undefined)) {
+      // 비율 정규화
+      const hostileRatio = dist.hostile_ratio || 0;
+      const civilRatio = dist.civil_ratio || 0;
+      const unknownRatio = dist.unknown_ratio || 0;
+      const total = hostileRatio + civilRatio + unknownRatio;
+      
+      if (total > 0) {
+        const normalizedHostile = hostileRatio / total;
+        const normalizedCivil = civilRatio / total;
+        // const normalizedUnknown = unknownRatio / total;  // 계산 불필요
+        
+        const rand = rng.next();
+        
+        if (rand < normalizedHostile) {
+          return 'HOSTILE';
+        } else if (rand < normalizedHostile + normalizedCivil) {
+          return 'CIVIL';
+        } else {
+          return 'UNKNOWN';
+        }
+      }
+    }
+    
+    // trueLabelDistribution이 없거나 비어있는 경우, 드론 타입과 isHostile 기반으로 추정
+    if (droneType === 'CIVILIAN') {
+      return 'CIVIL';
+    } else if (isHostile || droneType === 'ATTACK_UAV' || droneType === 'LOITER_MUNITION') {
+      return 'HOSTILE';
+    } else {
+      return 'UNKNOWN';
+    }
+  }
+
+  /**
    * 드론 배열 생성
    */
   private generateDrones(
@@ -376,6 +440,9 @@ export class ScenarioGenerator {
       const sizeClass = rng.choice(characteristics.sizes);
       const behavior = this.selectBehaviorForType(rng, droneType, isHostile);
       const recommendedMethod = rng.choice(characteristics.recommendedMethods);
+      
+      // Ground truth 레이블 할당
+      const trueLabel = this.assignTrueLabel(rng, droneType, isHostile);
       
       // 위치 생성
       const angle = rng.nextFloat(0, Math.PI * 2);
@@ -409,6 +476,7 @@ export class ScenarioGenerator {
         velocity: { vx, vy, climbRate: rng.nextFloat(-2, 2) },
         behavior,
         is_hostile: isHostile,
+        true_label: trueLabel,  // Ground truth 레이블
         drone_type: droneType,
         armed,
         size_class: sizeClass,
@@ -605,12 +673,18 @@ export class ScenarioGenerator {
   }
 }
 
-// 싱글톤 인스턴스
+// 싱글톤 인스턴스 (config가 다르면 새로 생성)
 let generatorInstance: ScenarioGenerator | null = null;
+let lastConfig: Partial<GeneratorConfig> | null = null;
 
 export function getGenerator(config?: Partial<GeneratorConfig>, outputDir?: string): ScenarioGenerator {
-  if (!generatorInstance) {
+  // config가 변경되었거나 인스턴스가 없으면 새로 생성
+  const configKey = JSON.stringify(config || {});
+  const lastConfigKey = JSON.stringify(lastConfig || {});
+  
+  if (!generatorInstance || configKey !== lastConfigKey) {
     generatorInstance = new ScenarioGenerator(config, outputDir);
+    lastConfig = config || null;
   }
   return generatorInstance;
 }

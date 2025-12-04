@@ -31,6 +31,7 @@ import {
   ThreatScoreConfig,
   DEFAULT_THREAT_SCORE_CONFIG,
 } from './threatScore';
+import { loadRuntimeParams } from '../../config/runtimeParams';
 
 // ============================================
 // 유틸리티 함수
@@ -115,6 +116,51 @@ export class SensorFusion {
         ...DEFAULT_FUSION_CONFIG.threatAssessment, 
         ...config.threatAssessment 
       };
+    }
+    
+    // 런타임 파라미터 적용
+    this.applyRuntimeParams();
+  }
+  
+  /**
+   * 런타임 파라미터 적용
+   */
+  private applyRuntimeParams(): void {
+    const params = loadRuntimeParams();
+    if (!params) return;
+    
+    // 센서 가중치 업데이트
+    if (params.sensor_radar_weight !== undefined) {
+      this.config.sensorWeights.radarExistence = params.sensor_radar_weight;
+      this.config.sensorWeights.radarPosition = params.sensor_radar_weight;
+    }
+    if (params.sensor_audio_weight !== undefined) {
+      this.config.sensorWeights.audioExistence = params.sensor_audio_weight;
+      this.config.sensorWeights.audioBearing = params.sensor_audio_weight * 0.8;  // 약간 낮춤
+    }
+    if (params.sensor_eo_weight !== undefined) {
+      this.config.sensorWeights.eoExistence = params.sensor_eo_weight;
+      this.config.sensorWeights.eoClassification = params.sensor_eo_weight;
+    }
+    
+    // Threat 가중치 업데이트
+    if (params.threat_weights) {
+      const weights = params.threat_weights;
+      if (weights.existence !== undefined) {
+        this.config.threatAssessment.weights.existence = weights.existence;
+      }
+      if (weights.classification !== undefined) {
+        this.config.threatAssessment.weights.classification = weights.classification;
+      }
+      if (weights.distance !== undefined) {
+        this.config.threatAssessment.weights.distance = weights.distance;
+      }
+      if (weights.velocity !== undefined) {
+        this.config.threatAssessment.weights.velocity = weights.velocity;
+      }
+      if (weights.behavior !== undefined) {
+        this.config.threatAssessment.weights.behavior = weights.behavior;
+      }
     }
   }
 

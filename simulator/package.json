@@ -10,6 +10,10 @@
     "batch": "ts-node src/batch/experimentRunner.ts",
     "batch:quick": "ts-node src/batch/experimentRunner.ts 5 30",
     "batch:full": "ts-node src/batch/experimentRunner.ts 50 120",
+    "eval": "ts-node src/scripts/run_evaluation_experiments.ts",
+    "eval:fast": "ts-node src/scripts/run_evaluation_experiments.ts --profile fast",
+    "eval:full": "ts-node src/scripts/run_evaluation_experiments.ts --profile full",
+    "eval:analysis": "cd ../analysis && python scripts/eval_classification_report.py",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"

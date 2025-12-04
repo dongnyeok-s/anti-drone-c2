@@ -32,6 +32,9 @@ export type DroneType =
 /** 드론 크기 */
 export type DroneSize = 'SMALL' | 'MEDIUM' | 'LARGE';
 
+/** Ground truth 레이블 (정답 레이블) */
+export type TrueLabel = 'HOSTILE' | 'CIVIL' | 'UNKNOWN';
+
 /** 적 드론 시뮬레이션 객체 */
 export interface HostileDrone {
   id: string;
@@ -44,6 +47,9 @@ export interface HostileDrone {
   spawnTime: number;
   lastRadarDetection: number;
   isNeutralized: boolean;
+  
+  // Ground truth 레이블 (정답 레이블) - 시뮬레이션 동안 변하지 않음
+  true_label: TrueLabel;
   
   // 확장 속성
   is_hostile?: boolean;          // 적대성 여부

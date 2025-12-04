@@ -311,11 +311,243 @@ P = base_rate × velocity_factor × evasion_factor × altitude_factor
 
 ---
 
+## 📊 2차 성능 향상 평가 파이프라인
+
+### 개요
+
+분류/위협 평가 성능을 정량적으로 측정하기 위한 자동화 파이프라인입니다.
+여러 시나리오×모드 조합을 자동으로 반복 실행하고, 성능 지표를 계산하여 리포트를 생성합니다.
+
+### 평가 시나리오
+
+- **all_hostile**: 모든 드론이 HOSTILE (100%)
+- **mixed_civil**: HOSTILE 50%, CIVIL 50%
+- **civil_only**: 모든 드론이 CIVIL (100%)
+
+### 평가 모드
+
+- **BASELINE**: 센서 융합 비활성화
+- **FUSION**: 센서 융합 활성화
+
+### 사용 방법
+
+#### 1. 평가 실험 실행
+
+**방법 1: Python 스크립트 사용 (권장)**
+
+```bash
+cd analysis
+# Full 프로파일로 모든 모드 실행
+python scripts/run_evaluation.py --profile full
+
+# Fast 프로파일로 특정 모드만 실행
+python scripts/run_evaluation.py --profile fast --modes baseline fusion_default
+```
+
+**방법 2: npm 스크립트 사용**
+
+```bash
+cd simulator
+npm run eval          # Fast 프로파일 (기본값)
+npm run eval:fast     # Fast 프로파일 (명시적)
+npm run eval:full     # Full 프로파일
+```
+
+이 명령은 다음을 수행합니다:
+- 6개 실험 조합 (3 시나리오 × 2 모드) × 20회 반복 = 총 120회 실행
+- 각 실행은 120초 동안 시뮬레이션 수행
+- 결과는 `simulator/logs/eval_full/{mode}/{experiment_name}/run_{i}.jsonl` 형태로 저장
+
+#### 2. 성능 리포트 생성
+
+```bash
+cd analysis
+# 기본 리포트 생성 (테이블만)
+python scripts/generate_report.py
+
+# 전체 리포트 생성 (플롯 포함)
+python scripts/generate_report.py --full
+
+# 플롯 없이 리포트만 생성
+python scripts/generate_report.py --no-plots
+```
+
+또는 로그 디렉토리를 직접 분석:
+
+```bash
+python scripts/eval_classification_report.py --logs-dir ../simulator/logs/eval
+```
+
+#### 3. 결과 확인
+
+생성되는 파일:
+- `analysis/results/classification_summary.md`: 마크다운 형식의 성능 리포트
+- `analysis/results/roc_pr_data/*.json`: ROC/PR Curve 데이터 (JSON)
+
+### 리포트 내용
+
+리포트에는 다음 지표가 포함됩니다:
+
+- **Accuracy**: 전체 정확도
+- **Precision (HOSTILE)**: HOSTILE 예측의 정밀도
+- **Recall (HOSTILE)**: HOSTILE 탐지율
+- **F1-Score (HOSTILE)**: HOSTILE F1 점수
+- **FP_rate**: False Positive 비율
+- **FN_rate**: False Negative 비율
+
+### 예측 레이블 계산 규칙
+
+시스템이 판단한 레이블(`pred_label`)은 다음 규칙으로 계산됩니다:
+
+- `pred_label = "HOSTILE"` if `threat_score >= 70`
+- `pred_label = "CIVIL"` if `classification == "CIVIL" AND class_confidence >= 0.7`
+- 나머지는 `pred_label = "UNKNOWN"`
+
+### 설정 변경
+
+평가 실험 설정은 `simulator/src/evaluation/config.ts`에서 수정할 수 있습니다:
+
+- 반복 횟수 (`runs`)
+- 시뮬레이션 시간 (`duration`)
+- 시나리오별 레이블 분포
+
+---
+
+## 🤖 자동 파라미터 튜닝 (Auto-Tuning)
+
+### 개요
+
+Threat/분류/센서 융합/PN 관련 파라미터를 자동으로 최적화하는 시스템입니다.
+랜덤 서치 기반으로 여러 파라미터 조합을 시도하고, 평가 파이프라인을 통해
+최적의 파라미터 세트를 찾습니다.
+
+### 평가 프로파일: Fast vs Full
+
+튜닝 속도를 위해 두 가지 프로파일을 제공합니다:
+
+#### Fast 프로파일 (기본값)
+- **목적**: 빠른 튜닝 탐색용, 상대적인 좋/나쁨 판단
+- **시나리오**: `all_hostile`, `mixed_civil` (2개)
+- **Runs**: 실험당 3회
+- **소요 시간**: 약 10-20분/trial
+- **사용 시기**: 파라미터 탐색 단계
+
+#### Full 프로파일
+- **목적**: 최종 보고서/논문용 정확한 성능 측정
+- **시나리오**: `all_hostile`, `mixed_civil`, `civil_only` (3개)
+- **Runs**: 실험당 20회
+- **소요 시간**: 약 1-2시간/trial
+- **사용 시기**: 최종 검증 단계
+
+### 사용 방법
+
+#### 1. 검색 공간 조정 (선택사항)
+
+`analysis/auto_tuning_config.py`에서 최적화할 파라미터의 범위를 조정할 수 있습니다:
+
+```python
+@dataclass
+class ParamSpace:
+    threat_engage_threshold: Tuple[float, float] = (55.0, 85.0)
+    civil_conf_threshold: Tuple[float, float] = (0.5, 0.9)
+    pn_nav_constant: Tuple[float, float] = (2.0, 4.5)
+    # ... 기타 파라미터
+```
+
+#### 2. 자동 튜닝 실행
+
+**Fast 모드 (권장, 기본값)**:
+```bash
+cd analysis
+python auto_tune.py --trials 30 --profile fast
+# 또는 (기본값이 fast이므로)
+python auto_tune.py --trials 30
+```
+
+**Full 모드 (최종 검증용)**:
+```bash
+python auto_tune.py --trials 5 --profile full
+```
+
+**시드 지정**:
+```bash
+python auto_tune.py --trials 30 --seed 12345 --profile fast
+```
+
+### 권장 워크플로우
+
+1. **Fast 모드로 여러 번 튜닝**
+   ```bash
+   python auto_tune.py --trials 30 --profile fast
+   ```
+   - 빠르게 좋은 파라미터 후보 탐색
+   - 여러 번 실행하여 다양한 후보 수집
+
+2. **Best config 확인 및 선택**
+   ```bash
+   cat analysis/results/auto_tune_best_config.json
+   ```
+   - 여러 번 실행한 결과 중 가장 좋은 파라미터 선택
+
+3. **Best config를 runtime_params로 고정**
+   ```bash
+   # run_full_pipeline.py가 자동으로 수행하거나
+   # 수동으로 복사
+   cp analysis/results/auto_tune_best_config.json \
+      simulator/config/runtime_params.json
+   ```
+
+4. **Full 모드로 최종 성능 측정**
+   ```bash
+   # 방법 1: auto_tune의 full 모드 사용
+   python auto_tune.py --trials 1 --profile full
+   
+   # 방법 2: 독립적으로 full 평가만 실행
+   cd simulator
+   npm run eval:full
+   ```
+   - 논문/보고서용 정확한 수치 확보
+
+#### 3. 결과 확인
+
+튜닝이 완료되면 다음 파일이 생성됩니다:
+
+- `analysis/results/auto_tune_history.json`: 모든 시행의 파라미터와 점수 기록
+- `analysis/results/auto_tune_best_config.json`: 최적 파라미터와 성능 지표
+
+### 튜닝 프로세스
+
+1. **파라미터 샘플링**: 검색 공간에서 무작위로 파라미터 세트 선택
+2. **파라미터 주입**: `simulator/config/runtime_params.json`에 저장
+3. **평가 실행**: `npm run eval` 실행 (여러 시나리오×모드 조합)
+4. **성능 분석**: `eval_classification_report.py` 실행하여 metrics 계산
+5. **Objective Score 계산**: F1, FP_rate 등을 종합한 점수 계산
+6. **Best 업데이트**: 현재까지의 최고 점수보다 좋으면 best_params 갱신
+7. **반복**: 지정된 횟수만큼 반복
+
+### Objective 함수
+
+현재 Objective는 다음을 최적화합니다:
+
+- **HOSTILE F1 점수** (all_hostile, mixed_civil 시나리오) - 가중치 1.0
+- **CIVIL False Positive 패널티** (mixed_civil) - 가중치 -2.0
+- **Accuracy 보너스** (all_hostile) - 가중치 0.3
+
+Objective 함수는 `analysis/auto_tune.py`의 `compute_objective_score()`에서 수정할 수 있습니다.
+
+### 주의사항
+
+- 튜닝은 시간이 오래 걸릴 수 있습니다 (50 trials × 평가 시간)
+- 각 trial마다 평가 실험이 실행되므로, 로그 파일이 많이 생성됩니다
+- `simulator/config/runtime_params.json`이 있으면 해당 파라미터가 사용되고, 없으면 기본값이 사용됩니다
+
+---
+
 ## 📈 데이터 플로우
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   C2 UI         │◄───►│   시뮬레이터     │◄───►│   음향 모델     │
+│   C2 UI         │◄───►│   시뮬레이터       │◄───►│   음향 모델       │
 │   (React)       │     │   (Node.js)     │     │   (Python)      │
 └────────┬────────┘     └────────┬────────┘     └─────────────────┘
          │                       │
@@ -323,7 +555,7 @@ P = base_rate × velocity_factor × evasion_factor × altitude_factor
          │ engagement_state      │
          ▼                       ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    JSONL 로그 파일                               │
+│                    JSONL 로그 파일                                │
 │                    simulator/logs/*.jsonl                       │
 └─────────────────────────────────────────────────────────────────┘
          │

@@ -5,6 +5,7 @@
  */
 
 import { Position3D, Velocity3D, HostileDrone } from '../types';
+import { loadRuntimeParams } from '../config/runtimeParams';
 
 // ============================================
 // 유도 모드 타입 정의
@@ -31,6 +32,30 @@ export const DEFAULT_PN_CONFIG: PNConfig = {
   leadTimeFactor: 2.0,     // 예측 시간 계수 증가
 };
 
+/**
+ * 런타임 파라미터를 적용한 PN 설정 반환
+ */
+export function getPNConfig(): PNConfig {
+  const params = loadRuntimeParams();
+  if (!params) {
+    return { ...DEFAULT_PN_CONFIG };
+  }
+  
+  const config = { ...DEFAULT_PN_CONFIG };
+  
+  if (params.pn_nav_constant !== undefined) {
+    config.navConstant = params.pn_nav_constant;
+  }
+  if (params.pn_max_turn_rate !== undefined) {
+    config.maxTurnRate = params.pn_max_turn_rate;
+  }
+  if (params.pn_min_closing_speed !== undefined) {
+    config.minClosingSpeed = params.pn_min_closing_speed;
+  }
+  
+  return config;
+}
+
 /** PN 유도 상태 (인터셉터에 저장) */
 export interface PNState {
   prevLosAngle: number;       // 이전 LOS 각도 (rad)
@@ -53,7 +78,7 @@ export function createInitialPNState(mode: GuidanceMode = 'PN'): PNState {
     lastClosingSpeed: 0,
     lastCommandedAccel: 0,
     guidanceMode: mode,
-    pnConfig: { ...DEFAULT_PN_CONFIG },
+    pnConfig: getPNConfig(),  // 런타임 파라미터 적용
   };
 }
 

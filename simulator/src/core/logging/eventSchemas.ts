@@ -65,6 +65,9 @@ export type InterceptorState =
 /** 식별 분류 */
 export type Classification = 'HOSTILE' | 'FRIENDLY' | 'NEUTRAL' | 'UNKNOWN';
 
+/** Ground truth 레이블 (정답 레이블) */
+export type TrueLabel = 'HOSTILE' | 'CIVIL' | 'UNKNOWN';
+
 /** 센서 타입 */
 export type SensorType = 'RADAR' | 'AUDIO' | 'EO';
 
@@ -125,6 +128,8 @@ export interface DroneSpawnedEvent extends BaseEvent {
   velocity: { vx: number; vy: number; climbRate: number };
   behavior: string;
   is_hostile: boolean;
+  // Ground truth 레이블 (정답 레이블)
+  true_label: TrueLabel;
   // 확장 속성
   drone_type?: DroneType;
   armed?: boolean;
@@ -243,6 +248,8 @@ export interface ThreatScoreUpdateEvent extends BaseEvent {
   };
   previous_level?: string;
   eo_confirmed?: boolean;            // EO 정찰 확인 여부
+  // Ground truth 레이블 (분석 편의를 위해 포함)
+  true_label?: TrueLabel;
 }
 
 // ============================================
@@ -484,8 +491,11 @@ export const INTERCEPT_METHOD_CONFIG = {
 export interface TrackCreatedLogEvent extends BaseEvent {
   event: 'track_created';
   track_id: string;
+  drone_id?: string;  // 매칭된 드론 ID (있는 경우)
   initial_sensor: 'RADAR' | 'AUDIO' | 'EO';
   position: { x: number; y: number; altitude: number };
+  // Ground truth 레이블 (드론이 매칭된 경우)
+  true_label?: TrueLabel;
 }
 
 /** 트랙 업데이트 이벤트 */
@@ -496,12 +506,16 @@ export interface FusedTrackUpdateLogEvent extends BaseEvent {
   existence_prob: number;
   threat_score: number;
   threat_level: string;
+  classification?: Classification;  // 분류 결과
+  class_confidence?: number;        // 분류 신뢰도
   sensors: {
     radar: boolean;
     audio: boolean;
     eo: boolean;
   };
   quality: number;
+  // Ground truth 레이블 (분석 편의를 위해 포함)
+  true_label?: TrueLabel;
 }
 
 /** 트랙 소멸 이벤트 */

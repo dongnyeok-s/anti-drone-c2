@@ -9,7 +9,7 @@
  */
 
 import { HostileDroneBehavior, HostileDroneConfig, DEFAULT_HOSTILE_DRONE_CONFIG } from '../../../shared/schemas';
-import { HostileDrone, Position3D, Velocity3D, InterceptorDrone } from '../types';
+import { HostileDrone, Position3D, Velocity3D, InterceptorDrone, TrueLabel } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -48,7 +48,8 @@ export function createHostileDrone(
   velocity: Velocity3D,
   behavior: HostileDroneBehavior = 'NORMAL',
   config: HostileDroneConfig = DEFAULT_HOSTILE_DRONE_CONFIG,
-  targetPosition?: Position3D
+  targetPosition?: Position3D,
+  trueLabel: TrueLabel = 'HOSTILE'  // 기본값: HOSTILE
 ): HostileDrone {
   return {
     id: `HOSTILE-${uuidv4().substring(0, 6).toUpperCase()}`,
@@ -61,6 +62,7 @@ export function createHostileDrone(
     spawnTime: 0,
     lastRadarDetection: 0,
     isNeutralized: false,
+    true_label: trueLabel,  // Ground truth 레이블
   };
 }
 
