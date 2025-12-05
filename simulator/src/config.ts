@@ -1,7 +1,9 @@
 /**
  * 시뮬레이터 설정 관리
- * 환경 변수 기반 설정 로더
+ * 환경 변수 기반 설정 로더 (Zod 검증 포함)
  */
+
+import { loadAndValidateEnv, printEnvConfig, type Env } from './config/env';
 
 export interface SimulatorConfig {
   port: number;
@@ -11,20 +13,42 @@ export interface SimulatorConfig {
   logEnabled: boolean;
   scenariosDir: string;
   nodeEnv: string;
+  // 보안 설정
+  authEnabled: boolean;
+  authToken?: string;
+  corsEnabled: boolean;
+  corsOrigin: string;
+  rateLimitEnabled: boolean;
+  rateLimitMaxRequests: number;
+  rateLimitWindowMs: number;
 }
 
 /**
- * 환경 변수에서 설정 로드
+ * 환경 변수에서 설정 로드 (검증 포함)
  */
 export function loadConfig(): SimulatorConfig {
+  const env: Env = loadAndValidateEnv();
+
+  // 개발 모드에서 설정 출력
+  if (env.NODE_ENV === 'development') {
+    printEnvConfig(env);
+  }
+
   return {
-    port: parseInt(process.env.SIMULATOR_PORT || '8080', 10),
-    wsUrl: process.env.SIMULATOR_WS_URL || 'ws://localhost:8080',
-    logsDir: process.env.LOGS_DIR || './logs',
-    logConsoleOutput: process.env.LOG_CONSOLE_OUTPUT === 'true',
-    logEnabled: process.env.LOG_ENABLED !== 'false',
-    scenariosDir: process.env.SCENARIOS_DIR || './scenarios/generated',
-    nodeEnv: process.env.NODE_ENV || 'development',
+    port: env.SIMULATOR_PORT,
+    wsUrl: env.SIMULATOR_WS_URL,
+    logsDir: env.LOGS_DIR,
+    logConsoleOutput: env.LOG_CONSOLE_OUTPUT,
+    logEnabled: env.LOG_ENABLED,
+    scenariosDir: env.SCENARIOS_DIR,
+    nodeEnv: env.NODE_ENV,
+    authEnabled: env.AUTH_ENABLED,
+    authToken: env.AUTH_TOKEN,
+    corsEnabled: env.CORS_ENABLED,
+    corsOrigin: env.CORS_ORIGIN,
+    rateLimitEnabled: env.RATE_LIMIT_ENABLED,
+    rateLimitMaxRequests: env.RATE_LIMIT_MAX_REQUESTS,
+    rateLimitWindowMs: env.RATE_LIMIT_WINDOW_MS,
   };
 }
 

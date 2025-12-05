@@ -19,8 +19,10 @@
     "test:coverage": "jest --coverage"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "uuid": "^9.0.1",
-    "ws": "^8.14.2"
+    "ws": "^8.14.2",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@types/jest": "^29.5.11",
