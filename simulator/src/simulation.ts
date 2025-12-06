@@ -5,8 +5,8 @@
  * 모든 이벤트를 JSONL로 자동 로깅
  */
 
-import { 
-  SimulatorToC2Event, 
+import {
+  SimulatorToC2Event,
   DroneStateUpdateEvent,
   InterceptorUpdateEvent,
   InterceptResultEvent,
@@ -22,38 +22,36 @@ import {
 } from '../../shared/schemas';
 
 import { SimulationWorld, HostileDrone, InterceptorDrone, Position3D } from './types';
-import { RadarSensor } from './sensors/radar';
-import { AcousticSensor } from './sensors/acousticSensor';
 import { EOSensor, EODetectionEvent } from './sensors/eoSensor';
-import { createHostileDrone, updateHostileDrone, setDroneBehavior } from './models/hostileDrone';
-import { 
-  createInterceptor, 
-  updateInterceptor, 
-  launchInterceptor, 
-  resetInterceptor, 
+import {
   ExtendedInterceptorDrone,
+  launchInterceptor,
+  resetInterceptor,
   setGuidanceMode,
   getInterceptorPNDebugInfo,
 } from './models/interceptor';
 import { getLogger, ExperimentLogger } from './core/logging/logger';
 import { GeneratedScenario, getGenerator } from './core/scenario/generator';
 import * as LogEvents from './core/logging/eventSchemas';
+import { AudioDetectionEvent } from './core/logging/eventSchemas';
 import { SensorFusion, SensorObservation, FusedTrack } from './core/fusion';
-import { 
-  EngagementManager, 
-  EngagementMode, 
+import {
+  EngagementManager,
+  EngagementMode,
   EngagementDecision,
   EngageStartLogEvent,
   EngageEndLogEvent,
   AbortReason,
 } from './core/engagement';
 import { getConfig } from './config';
+import { ISensorProvider } from './adapters/ISensorProvider';
+import { IDroneController } from './adapters/IDroneController';
+import { AdapterFactory } from './adapters/AdapterFactory';
 
 export class SimulationEngine {
   private world: SimulationWorld;
-  private radarSensor: RadarSensor;
-  private acousticSensor: AcousticSensor;
-  private eoSensor: EOSensor;  // EO 카메라 센서
+  private sensorProvider: ISensorProvider;  // 센서 제공자 (어댑터)
+  private droneController: IDroneController;  // 드론 제어자 (어댑터)
   private sensorFusion: SensorFusion;
   private engagementManager: EngagementManager;  // 교전 관리자
   private eventQueue: SimulatorToC2Event[] = [];
@@ -69,14 +67,14 @@ export class SimulationEngine {
   constructor(onEvent: (event: SimulatorToC2Event) => void) {
     this.onEvent = onEvent;
     const config = getConfig();
-    this.logger = getLogger({ 
-      logsDir: config.logsDir, 
-      enabled: config.logEnabled, 
-      consoleOutput: config.logConsoleOutput 
+    this.logger = getLogger({
+      logsDir: config.logsDir,
+      enabled: config.logEnabled,
+      consoleOutput: config.logConsoleOutput
     });
-    
+
     const basePosition: Position3D = { x: 0, y: 0, altitude: 50 };
-    
+
     this.world = {
       time: 0,
       isRunning: false,
@@ -88,17 +86,45 @@ export class SimulationEngine {
       basePosition,
     };
 
-    this.radarSensor = new RadarSensor(basePosition, this.world.radarConfig);
-    this.acousticSensor = new AcousticSensor(basePosition);
-    this.eoSensor = new EOSensor(basePosition, {
-      maxRange: 350,          // 350m 이내 탐지
-      detectionInterval: 1.0, // 1.0초 간격 (더 자주)
-      baseDetectionProb: 0.7, // 70% 기본 확률
-      hostileAccuracy: 0.92,  // HOSTILE → HOSTILE 92%
-      civilAccuracy: 0.85,    // CIVIL → CIVIL 85%
-    });
+    // Adapter Factory를 사용하여 센서 제공자 및 드론 제어자 생성
+    // RadarConfig (snake_case)를 SensorConfig.radar (camelCase)로 변환
+    this.sensorProvider = AdapterFactory.createSensorProvider(
+      config.simMode,
+      basePosition,
+      {
+        radar: {
+          scanRate: this.world.radarConfig.scan_rate,
+          maxRange: this.world.radarConfig.max_range,
+          radialNoiseSigma: this.world.radarConfig.radial_noise_sigma,
+          azimuthNoiseSigma: this.world.radarConfig.azimuth_noise_sigma,
+          falseAlarmRate: this.world.radarConfig.false_alarm_rate,
+          missProbability: this.world.radarConfig.miss_probability,
+        },
+        acoustic: {
+          maxRange: 500,
+          detectionInterval: 0.1,
+        },
+        eo: {
+          maxRange: 350,
+          detectionInterval: 1.0,
+          baseDetectionProb: 0.7,
+          hostileAccuracy: 0.92,
+          civilAccuracy: 0.85,
+        },
+      },
+      config.airSimBridgeUrl  // AirSim 브리지 URL 전달
+    );
+
+    this.droneController = AdapterFactory.createDroneController(
+      config.simMode,
+      this.world,
+      config.airSimBridgeUrl  // AirSim 브리지 URL 전달
+    );
+
     this.sensorFusion = new SensorFusion(basePosition);
     this.engagementManager = new EngagementManager();  // 교전 관리자 초기화
+
+    console.log(`[SimulationEngine] 시뮬레이션 모드: ${config.simMode}`);
   }
 
   /**
@@ -106,19 +132,22 @@ export class SimulationEngine {
    */
   start(): void {
     if (this.world.isRunning) return;
-    
+
     this.world.isRunning = true;
     this.tickTimer = setInterval(() => {
-      this.tick();
+      // async tick을 호출하되 await하지 않음 (non-blocking)
+      this.tick().catch(err => {
+        console.error('[SimulationEngine] Tick error:', err);
+      });
     }, this.world.tickInterval / this.world.speedMultiplier);
-    
+
     // 로깅: simulation_control
     this.logger.log({
       timestamp: this.world.time,
       event: 'simulation_control',
       action: 'start',
     });
-    
+
     this.emitStatusEvent();
   }
 
@@ -149,20 +178,21 @@ export class SimulationEngine {
    */
   reset(): void {
     this.pause();
-    
+
     // 시나리오 종료 로깅
     this.logger.endScenario(this.world.time);
-    
+
     this.world.time = 0;
     this.world.hostileDrones.clear();
     this.world.interceptors.clear();
     this.eventQueue = [];
     this.evadingDrones.clear();
-    
-    // 센서 및 융합 모듈 리셋
-    this.acousticSensor.reset();
+
+    // 어댑터 및 융합 모듈 리셋
+    this.sensorProvider.reset();
+    this.droneController.reset();
     this.sensorFusion.reset();
-    
+
     this.emitStatusEvent();
   }
 
@@ -189,43 +219,43 @@ export class SimulationEngine {
   }
 
   /**
-   * 시나리오 로드
+   * 시나리오 로드 (비동기)
    */
-  loadScenario(scenarioId: number | string): void {
+  async loadScenario(scenarioId: number | string): Promise<void> {
     this.reset();
     this.currentScenarioId = scenarioId;
-    
+
     // 기본 시나리오 또는 생성된 시나리오 로드
     if (typeof scenarioId === 'number') {
       switch (scenarioId) {
         case 1:
-          this.loadScenario1();
+          await this.loadScenario1();
           break;
         case 2:
-          this.loadScenario2();
+          await this.loadScenario2();
           break;
         case 3:
-          this.loadScenario3();
+          await this.loadScenario3();
           break;
         default:
-          this.loadScenario1();
+          await this.loadScenario1();
       }
     } else {
       // 생성된 시나리오 로드
       const generator = getGenerator();
       const scenario = generator.loadScenario(scenarioId);
       if (scenario) {
-        this.loadGeneratedScenario(scenario);
+        await this.loadGeneratedScenario(scenario);
       } else {
-        this.loadScenario1();
+        await this.loadScenario1();
       }
     }
 
     // 시나리오 시작 로깅
-    const scenarioName = typeof scenarioId === 'number' 
+    const scenarioName = typeof scenarioId === 'number'
       ? `기본 시나리오 ${scenarioId}`
       : `생성 시나리오 ${scenarioId}`;
-    
+
     this.logger.startScenario(
       scenarioId,
       scenarioName,
@@ -256,91 +286,104 @@ export class SimulationEngine {
   /**
    * 생성된 시나리오 로드
    */
-  private loadGeneratedScenario(scenario: GeneratedScenario): void {
+  private async loadGeneratedScenario(scenario: GeneratedScenario): Promise<void> {
     // 레이더 설정 적용
     this.world.radarConfig = scenario.radar_config;
-    this.radarSensor = new RadarSensor(this.world.basePosition, scenario.radar_config);
-
-    // 드론 생성
-    scenario.drones.forEach(droneData => {
-      const drone = createHostileDrone(
-        droneData.position,
-        droneData.velocity,
-        droneData.behavior,
-        droneData.config,
-        droneData.target_position,
-        droneData.true_label  // Ground truth 레이블 포함
-      );
-      // ID 및 확장 속성 덮어쓰기
-      const droneWithId = { 
-        ...drone, 
-        id: droneData.id,
-        is_hostile: droneData.is_hostile,
-        drone_type: droneData.drone_type,
-        armed: droneData.armed,
-        size_class: droneData.size_class,
-        recommended_method: droneData.recommended_method || undefined,  // null을 undefined로 변환
-      };
-      this.world.hostileDrones.set(droneData.id, droneWithId);
+    // 센서 제공자 설정 업데이트 (snake_case → camelCase 변환)
+    this.sensorProvider.updateConfig({
+      radar: {
+        scanRate: scenario.radar_config.scan_rate,
+        maxRange: scenario.radar_config.max_range,
+        radialNoiseSigma: scenario.radar_config.radial_noise_sigma,
+        azimuthNoiseSigma: scenario.radar_config.azimuth_noise_sigma,
+        falseAlarmRate: scenario.radar_config.false_alarm_rate,
+        missProbability: scenario.radar_config.miss_probability,
+      },
     });
+
+    // 드론 생성 (어댑터 사용)
+    for (const droneData of scenario.drones) {
+      const createdId = await this.droneController.spawnHostileDrone({
+        position: droneData.position,
+        velocity: droneData.velocity,
+        behavior: droneData.behavior,
+        config: droneData.config,
+        targetPosition: droneData.target_position,
+        trueLabel: droneData.true_label,
+      });
+
+      // ID 및 확장 속성 직접 수정 (시나리오 ID 보존)
+      const drone = this.world.hostileDrones.get(createdId);
+      if (drone && createdId !== droneData.id) {
+        this.world.hostileDrones.delete(createdId);
+        const droneWithId = {
+          ...drone,
+          id: droneData.id,
+          is_hostile: droneData.is_hostile,
+          drone_type: droneData.drone_type,
+          armed: droneData.armed,
+          size_class: droneData.size_class,
+          recommended_method: droneData.recommended_method || undefined,
+        };
+        this.world.hostileDrones.set(droneData.id, droneWithId);
+      }
+    }
 
     // 요격기 생성 (기본 유도 모드 적용)
     for (let i = 0; i < scenario.interceptor_count; i++) {
-      const interceptor = createInterceptor(
-        this.world.basePosition, 
-        DEFAULT_INTERCEPTOR_CONFIG,
-        this.defaultGuidanceMode
-      );
-      this.world.interceptors.set(interceptor.id, interceptor);
+      await this.droneController.spawnInterceptor({
+        position: this.world.basePosition,
+        config: DEFAULT_INTERCEPTOR_CONFIG,
+      });
     }
   }
 
   /**
    * 시나리오 1: 기본 혼합
    */
-  private loadScenario1(): void {
-    const hostile1 = createHostileDrone(
-      { x: 600, y: 500, altitude: 80 },
-      { vx: -12, vy: -10, climbRate: -0.5 },
-      'NORMAL',
-      DEFAULT_HOSTILE_DRONE_CONFIG,
-      undefined,
-      'HOSTILE'  // Ground truth 레이블
-    );
-    
-    const hostile2 = createHostileDrone(
-      { x: -400, y: 200, altitude: 120 },
-      { vx: 5, vy: 8, climbRate: 0 },
-      'NORMAL',
-      DEFAULT_HOSTILE_DRONE_CONFIG,
-      undefined,
-      'CIVIL'  // Ground truth 레이블
-    );
-    
-    const hostile3 = createHostileDrone(
-      { x: 100, y: -450, altitude: 150 },
-      { vx: 0, vy: 5, climbRate: 0 },
-      'RECON',
-      DEFAULT_HOSTILE_DRONE_CONFIG,
-      { x: 0, y: 0, altitude: 150 },
-      'HOSTILE'  // Ground truth 레이블
-    );
+  private async loadScenario1(): Promise<void> {
+    await this.droneController.spawnHostileDrone({
+      position: { x: 600, y: 500, altitude: 80 },
+      velocity: { vx: -12, vy: -10, climbRate: -0.5 },
+      behavior: 'NORMAL',
+      config: DEFAULT_HOSTILE_DRONE_CONFIG,
+      targetPosition: undefined,
+      trueLabel: 'HOSTILE',
+    });
 
-    this.world.hostileDrones.set(hostile1.id, hostile1);
-    this.world.hostileDrones.set(hostile2.id, hostile2);
-    this.world.hostileDrones.set(hostile3.id, hostile3);
+    await this.droneController.spawnHostileDrone({
+      position: { x: -400, y: 200, altitude: 120 },
+      velocity: { vx: 5, vy: 8, climbRate: 0 },
+      behavior: 'NORMAL',
+      config: DEFAULT_HOSTILE_DRONE_CONFIG,
+      targetPosition: undefined,
+      trueLabel: 'CIVIL',
+    });
 
-    const int1 = createInterceptor(this.world.basePosition, DEFAULT_INTERCEPTOR_CONFIG, this.defaultGuidanceMode);
-    const int2 = createInterceptor(this.world.basePosition, DEFAULT_INTERCEPTOR_CONFIG, this.defaultGuidanceMode);
-    
-    this.world.interceptors.set(int1.id, int1);
-    this.world.interceptors.set(int2.id, int2);
+    await this.droneController.spawnHostileDrone({
+      position: { x: 100, y: -450, altitude: 150 },
+      velocity: { vx: 0, vy: 5, climbRate: 0 },
+      behavior: 'RECON',
+      config: DEFAULT_HOSTILE_DRONE_CONFIG,
+      targetPosition: { x: 0, y: 0, altitude: 150 },
+      trueLabel: 'HOSTILE',
+    });
+
+    await this.droneController.spawnInterceptor({
+      position: this.world.basePosition,
+      config: DEFAULT_INTERCEPTOR_CONFIG,
+    });
+
+    await this.droneController.spawnInterceptor({
+      position: this.world.basePosition,
+      config: DEFAULT_INTERCEPTOR_CONFIG,
+    });
   }
 
   /**
    * 시나리오 2: 다중 위협
    */
-  private loadScenario2(): void {
+  private async loadScenario2(): Promise<void> {
     const directions = [
       { x: 700, y: 100, vx: -15, vy: -2 },
       { x: 100, y: 700, vx: -2, vy: -15 },
@@ -348,83 +391,90 @@ export class SimulationEngine {
       { x: 100, y: -600, vx: -2, vy: 12 },
     ];
 
-    directions.forEach((dir, i) => {
-      const hostile = createHostileDrone(
-        { x: dir.x, y: dir.y, altitude: 60 + i * 20 },
-        { vx: dir.vx, vy: dir.vy, climbRate: 0 },
-        'ATTACK_RUN',
-        DEFAULT_HOSTILE_DRONE_CONFIG,
-        undefined,
-        'HOSTILE'  // Ground truth 레이블
-      );
-      this.world.hostileDrones.set(hostile.id, hostile);
-    });
+    for (let i = 0; i < directions.length; i++) {
+      const dir = directions[i];
+      await this.droneController.spawnHostileDrone({
+        position: { x: dir.x, y: dir.y, altitude: 60 + i * 20 },
+        velocity: { vx: dir.vx, vy: dir.vy, climbRate: 0 },
+        behavior: 'ATTACK_RUN',
+        config: DEFAULT_HOSTILE_DRONE_CONFIG,
+        targetPosition: undefined,
+        trueLabel: 'HOSTILE',
+      });
+    }
 
     for (let i = 0; i < 3; i++) {
-      const interceptor = createInterceptor(this.world.basePosition, DEFAULT_INTERCEPTOR_CONFIG, this.defaultGuidanceMode);
-      this.world.interceptors.set(interceptor.id, interceptor);
+      await this.droneController.spawnInterceptor({
+        position: this.world.basePosition,
+        config: DEFAULT_INTERCEPTOR_CONFIG,
+      });
     }
   }
 
   /**
    * 시나리오 3: 은밀 접근
    */
-  private loadScenario3(): void {
-    const hostile1 = createHostileDrone(
-      { x: 400, y: 300, altitude: 40 },
-      { vx: -2, vy: -1.5, climbRate: 0 },
-      'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 5 },
-      undefined,
-      'HOSTILE'  // Ground truth 레이블
-    );
-    
-    const hostile2 = createHostileDrone(
-      { x: -350, y: 400, altitude: 35 },
-      { vx: 1.5, vy: -2, climbRate: 0.1 },
-      'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 4 },
-      undefined,
-      'CIVIL'  // Ground truth 레이블
-    );
-    
-    const hostile3 = createHostileDrone(
-      { x: 800, y: -200, altitude: 200 },
-      { vx: -25, vy: 5, climbRate: -1 },
-      'NORMAL',
-      { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 25 },
-      undefined,
-      'HOSTILE'  // Ground truth 레이블
-    );
+  private async loadScenario3(): Promise<void> {
+    await this.droneController.spawnHostileDrone({
+      position: { x: 400, y: 300, altitude: 40 },
+      velocity: { vx: -2, vy: -1.5, climbRate: 0 },
+      behavior: 'NORMAL',
+      config: { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 5 },
+      targetPosition: undefined,
+      trueLabel: 'HOSTILE',
+    });
 
-    this.world.hostileDrones.set(hostile1.id, hostile1);
-    this.world.hostileDrones.set(hostile2.id, hostile2);
-    this.world.hostileDrones.set(hostile3.id, hostile3);
+    await this.droneController.spawnHostileDrone({
+      position: { x: -350, y: 400, altitude: 35 },
+      velocity: { vx: 1.5, vy: -2, climbRate: 0.1 },
+      behavior: 'NORMAL',
+      config: { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 4 },
+      targetPosition: undefined,
+      trueLabel: 'CIVIL',
+    });
+
+    await this.droneController.spawnHostileDrone({
+      position: { x: 800, y: -200, altitude: 200 },
+      velocity: { vx: -25, vy: 5, climbRate: -1 },
+      behavior: 'NORMAL',
+      config: { ...DEFAULT_HOSTILE_DRONE_CONFIG, cruise_speed: 25 },
+      targetPosition: undefined,
+      trueLabel: 'HOSTILE',
+    });
 
     for (let i = 0; i < 2; i++) {
-      const interceptor = createInterceptor(this.world.basePosition, DEFAULT_INTERCEPTOR_CONFIG, this.defaultGuidanceMode);
-      this.world.interceptors.set(interceptor.id, interceptor);
+      await this.droneController.spawnInterceptor({
+        position: this.world.basePosition,
+        config: DEFAULT_INTERCEPTOR_CONFIG,
+      });
     }
   }
 
   /**
-   * 한 틱 실행
+   * 한 틱 실행 (비동기)
    */
-  private tick(): void {
+  private async tick(): Promise<void> {
     const deltaTime = this.world.tickInterval / 1000;
     this.world.time += deltaTime;
 
-    // 1. 적 드론 업데이트
-    this.world.hostileDrones.forEach((drone, id) => {
+    // 1. 적 드론 업데이트 (어댑터 사용)
+    const droneIds = Array.from(this.world.hostileDrones.keys());
+    for (const id of droneIds) {
+      const drone = this.world.hostileDrones.get(id);
+      if (!drone) continue;
+
       const prevEvading = drone.isEvading;
-      
-      const updated = updateHostileDrone(
-        drone,
+
+      // 어댑터를 통한 드론 업데이트
+      await this.droneController.updateHostileDrone(
+        id,
         deltaTime,
         this.world.basePosition,
         this.world.interceptors
       );
-      this.world.hostileDrones.set(id, updated);
+
+      const updated = this.world.hostileDrones.get(id);
+      if (!updated) continue;
 
       // 회피 시작/종료 로깅 및 센서 융합 업데이트
       if (!prevEvading && updated.isEvading) {
@@ -458,34 +508,48 @@ export class SimulationEngine {
       if (Math.floor(this.world.time * 2) % 2 === 0) {
         this.emitDroneStateEvent(updated);
       }
-    });
+    }
 
-    // 2. 요격 드론 업데이트
-    this.world.interceptors.forEach((interceptor, id) => {
-      const target = interceptor.targetId 
-        ? this.world.hostileDrones.get(interceptor.targetId) || null
-        : null;
+    // 2. 요격 드론 업데이트 (어댑터 사용)
+    const interceptorIds = Array.from(this.world.interceptors.keys());
+    for (const id of interceptorIds) {
+      const interceptor = this.world.interceptors.get(id);
+      if (!interceptor) continue;
 
-      const { interceptor: updated, interceptResult } = updateInterceptor(
-        interceptor as ExtendedInterceptorDrone,
+      const target = interceptor.targetId
+        ? this.world.hostileDrones.get(interceptor.targetId)
+        : undefined;
+
+      // 어댑터를 통한 요격기 업데이트
+      await this.droneController.updateInterceptor(
+        id,
         deltaTime,
-        target,
-        this.world.basePosition,
-        this.world.time
+        await this.droneController.getAllHostileDrones(),
+        this.world.basePosition
       );
 
-      this.world.interceptors.set(id, updated as InterceptorDrone);
+      const updated = this.world.interceptors.get(id) as ExtendedInterceptorDrone;
+      if (!updated) continue;
 
-      if (interceptResult) {
-        this.handleInterceptResult(updated, target!, interceptResult);
+      // 요격 결과 확인 (별도 처리 필요 - 기존 로직 유지)
+      // TODO: interceptResult를 어댑터에서 반환하도록 개선 가능
+      if (updated.targetId && target) {
+        const dx = updated.position.x - target.position.x;
+        const dy = updated.position.y - target.position.y;
+        const dz = updated.position.altitude - target.position.altitude;
+        const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (distance < 5 && updated.state === 'ENGAGING') {
+          this.handleInterceptResult(updated, target, 'SUCCESS');
+        }
       }
 
       this.emitInterceptorEvent(updated);
-    });
+    }
 
-    // 3. 레이더 스캔 및 센서 융합
-    const radarEvents = this.radarSensor.scan(this.world.time, this.world.hostileDrones);
-    radarEvents.forEach(event => {
+    // 3. 레이더 스캔 및 센서 융합 (어댑터 사용)
+    const radarEvents = await this.sensorProvider.scanRadar(this.world.time, this.world.hostileDrones);
+    radarEvents.forEach((event: RadarDetectionEvent) => {
       this.onEvent(event);
       
       // 레이더 탐지 로깅
@@ -521,9 +585,9 @@ export class SimulationEngine {
       }
     });
 
-    // 4. 음향 센서 스캔 및 센서 융합
-    const audioEvents = this.acousticSensor.scan(this.world.time, this.world.hostileDrones);
-    audioEvents.forEach(event => {
+    // 4. 음향 센서 스캔 및 센서 융합 (어댑터 사용)
+    const audioEvents = await this.sensorProvider.detectAudio(this.world.time, this.world.hostileDrones);
+    audioEvents.forEach((event: AudioDetectionEvent) => {
       // 원시 이벤트 전송
       this.onEvent({
         type: 'audio_detection',
@@ -600,7 +664,7 @@ export class SimulationEngine {
 
     // 5.5 EO 카메라 센서 스캔 (300m 이내 드론에 대해)
     if (this.fusionEnabled) {
-      this.processEOSensorScan();
+      await this.processEOSensorScan();
     }
 
     // 6. 자동 교전 의사결정 (Threat 기반)
@@ -956,14 +1020,13 @@ export class SimulationEngine {
   }
 
   /**
-   * 드론 행동 변경
+   * 드론 행동 변경 (어댑터 사용)
    */
-  setDroneBehaviorMode(droneId: string, behavior: HostileDroneBehavior): boolean {
-    const drone = this.world.hostileDrones.get(droneId);
+  async setDroneBehaviorMode(droneId: string, behavior: HostileDroneBehavior): Promise<boolean> {
+    const drone = await this.droneController.getHostileDrone(droneId);
     if (!drone) return false;
 
-    const updated = setDroneBehavior(drone, behavior);
-    this.world.hostileDrones.set(droneId, updated);
+    await this.droneController.setHostileDroneBehavior(droneId, behavior);
     return true;
   }
 
@@ -1160,16 +1223,16 @@ export class SimulationEngine {
   // ============================================
 
   /**
-   * EO 카메라 센서 스캔 처리
-   * EOSensor 모듈을 사용하여 300m 이내 드론 탐지
+   * EO 카메라 센서 스캔 처리 (어댑터 사용)
+   * 300m 이내 드론 탐지
    */
-  private processEOSensorScan(): void {
+  private async processEOSensorScan(): Promise<void> {
     const currentTime = this.world.time;
 
-    // EOSensor로 드론 스캔
-    const eoEvents = this.eoSensor.scan(currentTime, this.world.hostileDrones);
+    // 어댑터를 통한 EO 센서 스캔
+    const eoEvents = await this.sensorProvider.detectEO(currentTime, this.world.hostileDrones);
 
-    eoEvents.forEach(event => {
+    eoEvents.forEach((event: EODetectionEvent) => {
       // SensorObservation으로 변환
       const observation = EOSensor.toObservation(event);
 

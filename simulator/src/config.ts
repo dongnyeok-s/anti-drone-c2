@@ -4,6 +4,7 @@
  */
 
 import { loadAndValidateEnv, printEnvConfig, type Env } from './config/env';
+import { SimMode } from './adapters/AdapterFactory';
 
 export interface SimulatorConfig {
   port: number;
@@ -21,6 +22,11 @@ export interface SimulatorConfig {
   rateLimitEnabled: boolean;
   rateLimitMaxRequests: number;
   rateLimitWindowMs: number;
+  // 시뮬레이션 모드 설정
+  simMode: SimMode;
+  airSimBridgeUrl: string;
+  airSimSyncInterval: number;
+  airSimEnableRendering: boolean;
 }
 
 /**
@@ -49,6 +55,10 @@ export function loadConfig(): SimulatorConfig {
     rateLimitEnabled: env.RATE_LIMIT_ENABLED,
     rateLimitMaxRequests: env.RATE_LIMIT_MAX_REQUESTS,
     rateLimitWindowMs: env.RATE_LIMIT_WINDOW_MS,
+    simMode: env.SIM_MODE as SimMode,
+    airSimBridgeUrl: env.AIRSIM_BRIDGE_URL,
+    airSimSyncInterval: env.AIRSIM_SYNC_INTERVAL,
+    airSimEnableRendering: env.AIRSIM_ENABLE_RENDERING,
   };
 }
 

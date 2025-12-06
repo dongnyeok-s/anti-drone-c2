@@ -94,6 +94,32 @@ const envSchema = z.object({
     .refine((val) => val > 0, {
       message: 'RATE_LIMIT_WINDOW_MS는 양수여야 합니다',
     }),
+
+  // 시뮬레이션 모드 설정
+  SIM_MODE: z
+    .enum(['INTERNAL', 'EXTERNAL_AIRSIM'])
+    .default('INTERNAL'),
+
+  // AirSim 브리지 설정 (EXTERNAL_AIRSIM 모드일 때만 사용)
+  AIRSIM_BRIDGE_URL: z
+    .string()
+    .default('ws://localhost:9000')
+    .refine((val) => val.startsWith('ws://') || val.startsWith('wss://'), {
+      message: 'AIRSIM_BRIDGE_URL은 ws:// 또는 wss://로 시작해야 합니다',
+    }),
+
+  AIRSIM_SYNC_INTERVAL: z
+    .string()
+    .default('100')
+    .transform((val) => parseInt(val, 10))
+    .refine((val) => val > 0, {
+      message: 'AIRSIM_SYNC_INTERVAL은 양수여야 합니다',
+    }),
+
+  AIRSIM_ENABLE_RENDERING: z
+    .string()
+    .default('true')
+    .transform((val) => val.toLowerCase() === 'true'),
 });
 
 /**

@@ -1,0 +1,5 @@
+# AirSim Bridge Requirements
+airsim>=1.8.1
+websockets>=10.0
+asyncio-mqtt>=0.16.1
+numpy>=1.21.0
