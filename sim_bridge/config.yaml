@@ -1,0 +1,64 @@
+# PX4 SITL Bridge Configuration
+
+# C2 Server Connection
+c2_server:
+  url: "ws://localhost:8080"
+  reconnect_interval: 5  # seconds
+
+# PX4 Connection Settings
+# For SITL: use udp:// addresses
+# For real drones: use serial:// addresses
+px4_connections:
+  # Hostile drones (simulated enemy drones)
+  - id: "hostile_1"
+    connection_string: "udp://:14540"
+    role: "hostile"
+    auto_arm: true
+
+  - id: "hostile_2"
+    connection_string: "udp://:14541"
+    role: "hostile"
+    auto_arm: true
+
+  # Interceptor drones (friendly interceptors)
+  - id: "interceptor_1"
+    connection_string: "udp://:14550"
+    role: "interceptor"
+    auto_arm: false  # Wait for C2 command
+
+# Sensor Simulation
+sensors:
+  # Radar simulation (based on GPS position)
+  radar:
+    enabled: true
+    scan_rate: 1.0  # Hz
+    max_range: 1000  # meters
+    noise_sigma: 10  # meters
+
+  # Acoustic detection (simulated)
+  acoustic:
+    enabled: true
+    detection_interval: 0.5  # seconds
+    max_range: 500  # meters
+
+  # EO camera (YOLO perception module)
+  eo:
+    enabled: false  # Enable when perception module is ready
+    detection_interval: 1.0  # seconds
+    max_range: 350  # meters
+
+# Update rates
+update_rates:
+  telemetry: 10  # Hz (send drone state to C2)
+  command_check: 20  # Hz (check for C2 commands)
+
+# Base station position (reference point)
+base_position:
+  lat: 37.5665  # Seoul City Hall example
+  lon: 126.9780
+  alt: 50.0  # meters MSL
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "sim_bridge.log"
